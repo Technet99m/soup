@@ -1,0 +1,27 @@
+[package]
+name = "soup"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "soup"
+path = "src/main.rs"
+
+[lib]
+name = "soup"
+path = "src/lib.rs"
+
+[dependencies]
+arrayvec = "0.7"
+rand = "0.8"
+uuid = { version = "1", features = ["v4", "serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+ctrlc = "3"
+ratatui = "0.28"
+crossterm = "0.28"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
