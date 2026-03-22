@@ -30,6 +30,12 @@ pub enum Opcode {
     Split,
     ScanFwd,
     ScanBwd,
+    /// Deposit reg_b energy from own pool into energy_map[wh]. Costs 1 base + energy given.
+    GiveEnergy,
+    /// Transfer all energy at energy_map[rh] to self, zeroing the deposit. Costs 1 base.
+    TakeEnergy,
+    /// Load min(energy_map[rh], 65535) into reg_b. Costs 1 base.
+    SenseEnergy,
     Halt,
 }
 
@@ -66,6 +72,9 @@ impl From<u8> for Opcode {
             27  => Self::Split,
             28  => Self::ScanFwd,
             29  => Self::ScanBwd,
+            30  => Self::GiveEnergy,
+            31  => Self::TakeEnergy,
+            32  => Self::SenseEnergy,
             255 => Self::Halt,
             _   => Self::Nop,
         }
@@ -105,6 +114,9 @@ impl From<Opcode> for u8 {
             Opcode::Split         => 27,
             Opcode::ScanFwd       => 28,
             Opcode::ScanBwd       => 29,
+            Opcode::GiveEnergy    => 30,
+            Opcode::TakeEnergy    => 31,
+            Opcode::SenseEnergy   => 32,
             Opcode::Halt          => 255,
         }
     }
@@ -144,7 +156,7 @@ mod tests {
 
     #[test]
     fn nop_range_decodes_as_nop() {
-        for b in 30u8..=254 {
+        for b in 33u8..=254 {
             assert_eq!(Opcode::from(b), Opcode::Nop, "byte {b} should be Nop");
         }
     }

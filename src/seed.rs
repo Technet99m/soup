@@ -1,26 +1,24 @@
 /// The primordial ancestor — a bloated, inefficient self-replicator. 32 bytes.
 /// Intentionally wasteful so evolution has clear room to improve.
 ///
+/// Energy mechanics:
+///   [1]  TAKE_ENERGY — absorb any deposit left by parent at self.start (RH=start after [0])
+///   After COMMIT, deposits 100 energy at the child's start address so the child
+///   can absorb it on its first TAKE_ENERGY call.
+///
 /// Improvable regions (mutations that make descendants more competitive):
-///   [1]        SEEK_SELF_START — redundant; RH is already at start
 ///   [4]        NOP_40          — wasted execute + copy cycle
 ///   [8],[9]    SEEK_SELF_START — both redundant before copy loop
 ///   [12]       NOP_50          — wasted cycle inside approach to loop
 ///   [18],[19]  NOP_60, NOP_70  — wasted cycles after loop
-///   [21]..[28] NOP variants    — 8 bytes of pure padding; each costs 1 energy
-///                                to execute AND 1 energy to copy per cycle
-///
-/// The 15 unnecessary bytes (vs a minimal 17-byte equivalent) cost roughly:
-///   - 3 extra SEEKs:          3 energy/cycle
-///   - 10 extra NOPs:         10 energy/cycle
-///   - 15 extra COPY iters:   45 energy/cycle  (32 copies vs 17)
-///   ≈ 58 extra energy per replication — about 40% overhead
+///   [26]..[28] NOP variants    — 3 bytes of remaining padding
+///   Energy amount at [23] (100) — evolution can tune this up or down
 ///
 /// JMP_BWD at [31], A=32: ip_next = (31+1) - 32 = 0 → loops back to start ✓
 /// LOOP_CLOSE "decrement then check": A=32 → COPY executes exactly 32 times ✓
 pub const SEED: [u8; 32] = [
     5,    // [0]  SEEK_SELF_START   — RH = start (necessary)
-    5,    // [1]  SEEK_SELF_START   — REDUNDANT: RH is already at start
+    31,   // [1]  TAKE_ENERGY       — absorb any deposit at RH=start from parent
     12,   // [2]  LOAD_IMM
     32,   // [3]    A = 32          — own length (for ALLOC)
     40,   // [4]  NOP               — wasted cycle
@@ -40,14 +38,14 @@ pub const SEED: [u8; 32] = [
     60,   // [18] NOP               — wasted cycle
     70,   // [19] NOP               — wasted cycle
     26,   // [20] COMMIT            — register child at B with size A
-    80,   // [21] NOP               — padding (wasted copy + execute)
-    90,   // [22] NOP               — padding
-    100,  // [23] NOP               — padding
-    110,  // [24] NOP               — padding
-    120,  // [25] NOP               — padding
-    130,  // [26] NOP               — padding
-    140,  // [27] NOP               — padding
-    150,  // [28] NOP               — padding
+    11,   // [21] SET_WRITE_HEAD    — WH = B (child_start; reg_b unchanged after COMMIT)
+    12,   // [22] LOAD_IMM
+    100,  // [23]   A = 100         — energy gift for child
+    17,   // [24] SWAP              — reg_b = 100, reg_a = low byte of old reg_b
+    30,   // [25] GIVE_ENERGY       — deposit reg_b=100 at WH=child_start
+    80,   // [26] NOP               — padding
+    90,   // [27] NOP               — padding
+    110,  // [28] NOP               — padding
     12,   // [29] LOAD_IMM
     32,   // [30]   A = 32          — JMP_BWD distance
     20,   // [31] JMP_BWD           — ip_next = (31+1) - 32 = 0 ✓
@@ -72,7 +70,7 @@ mod tests {
     #[test]
     fn seed_opcodes_at_expected_positions() {
         assert_eq!(SEED[0],  5,  "SEEK_SELF_START");
-        assert_eq!(SEED[1],  5,  "SEEK_SELF_START (redundant)");
+        assert_eq!(SEED[1],  31, "TAKE_ENERGY");
         assert_eq!(SEED[2],  12, "LOAD_IMM");
         assert_eq!(SEED[5],  25, "ALLOC");
         assert_eq!(SEED[6],  11, "SET_WRITE_HEAD");
@@ -85,16 +83,21 @@ mod tests {
         assert_eq!(SEED[15], 24, "LOOP_CLOSE");
         assert_eq!(SEED[16], 12, "LOAD_IMM");
         assert_eq!(SEED[20], 26, "COMMIT");
+        assert_eq!(SEED[21], 11, "SET_WRITE_HEAD (reset WH to child_start for energy gift)");
+        assert_eq!(SEED[22], 12, "LOAD_IMM");
+        assert_eq!(SEED[23], 100, "energy gift amount");
+        assert_eq!(SEED[24], 17, "SWAP (put amount into reg_b)");
+        assert_eq!(SEED[25], 30, "GIVE_ENERGY");
         assert_eq!(SEED[29], 12, "LOAD_IMM");
         assert_eq!(SEED[31], 20, "JMP_BWD");
     }
 
     #[test]
     fn nop_variants_are_all_nops() {
-        // Positions 21-28 should all decode as NOP (opcodes 30-254 are NOP variants)
-        for pos in 21..=28 {
+        // Positions 26-28 are the remaining NOP padding (opcodes 33-254 are NOP variants)
+        for pos in 26..=28 {
             assert!(
-                SEED[pos] >= 30 && SEED[pos] <= 254,
+                SEED[pos] >= 33 && SEED[pos] <= 254,
                 "position {pos} should be a NOP variant, got {}",
                 SEED[pos]
             );

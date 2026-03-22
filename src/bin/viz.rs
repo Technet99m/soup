@@ -40,6 +40,7 @@ struct App {
     steps_per_frame: u64,
     table_state: TableState,
     selected_id: Option<u32>,
+    energy_overlay: bool,
 }
 
 impl App {
@@ -52,6 +53,7 @@ impl App {
             steps_per_frame: 100,
             table_state,
             selected_id: None,
+            energy_overlay: false,
         }
     }
 
@@ -115,11 +117,32 @@ fn build_color_map(world: &World) -> Box<[u8; 65536]> {
     map
 }
 
-fn render_memory(world: &World, frame: &mut Frame, area: Rect) {
+/// Map an energy deposit value to a yellow-scale color intensity.
+/// Returns None for zero (no deposit), or Some(Color) for non-zero.
+fn energy_color(deposit: u32) -> Option<Color> {
+    if deposit == 0 {
+        return None;
+    }
+    // log2 scale: 1–15 → dim yellow, 16–255 → yellow, 256+ → bright white-yellow
+    let level = (deposit as f64).log2() as u32;
+    let color = match level {
+        0..=3  => Color::Rgb(80, 60, 0),
+        4..=7  => Color::Rgb(160, 120, 0),
+        8..=11 => Color::Rgb(220, 180, 0),
+        _      => Color::Rgb(255, 240, 80),
+    };
+    Some(color)
+}
+
+fn render_memory(world: &World, energy_overlay: bool, frame: &mut Frame, area: Rect) {
+    let total_deposited: u64 = world.memory.energy_map.iter().map(|&v| v as u64).sum();
+    let overlay_label = if energy_overlay { "  [e:energy]" } else { "  [e:programs]" };
     let title = format!(
-        " Memory  {} programs  {:.1}% used ",
+        " Memory  {} programs  {:.1}% used  deposited:{}{}",
         world.programs.len(),
         world.memory_utilization() * 100.0,
+        total_deposited,
+        overlay_label,
     );
     let block = Block::default().title(title).borders(Borders::ALL);
     let inner = block.inner(area);
@@ -145,19 +168,30 @@ fn render_memory(world: &World, frame: &mut Frame, area: Rect) {
             let addr_start = (cell_idx * bytes_per_cell).min(65535);
             let addr_end = ((cell_idx + 1) * bytes_per_cell).min(65536);
 
-            // Majority vote on non-free color in this byte range
-            let mut counts = [0u16; 8];
-            for addr in addr_start..addr_end {
-                counts[cmap[addr] as usize] += 1;
-            }
-            // Pick dominant occupied color (index 1–7), fall back to free (0)
-            let dominant = (1u8..8).max_by_key(|&i| counts[i as usize]).unwrap_or(0);
-            let occupied = counts[dominant as usize] > 0;
-
-            let (ch, color) = if occupied && dominant > 0 {
-                ("\u{2588}", PALETTE[dominant as usize])
+            let (ch, color) = if energy_overlay {
+                // Max energy in this byte range
+                let max_e = (addr_start..addr_end)
+                    .map(|a| world.memory.energy_map[a])
+                    .max()
+                    .unwrap_or(0);
+                match energy_color(max_e) {
+                    Some(c) => ("\u{2588}", c),
+                    None    => ("\u{00B7}", Color::DarkGray),
+                }
             } else {
-                ("\u{00B7}", Color::DarkGray)
+                // Majority vote on non-free color in this byte range
+                let mut counts = [0u16; 8];
+                for addr in addr_start..addr_end {
+                    counts[cmap[addr] as usize] += 1;
+                }
+                // Pick dominant occupied color (index 1–7), fall back to free (0)
+                let dominant = (1u8..8).max_by_key(|&i| counts[i as usize]).unwrap_or(0);
+                let occupied = counts[dominant as usize] > 0;
+                if occupied && dominant > 0 {
+                    ("\u{2588}", PALETTE[dominant as usize])
+                } else {
+                    ("\u{00B7}", Color::DarkGray)
+                }
             };
             spans.push(Span::styled(ch, Style::default().fg(color)));
         }
@@ -271,7 +305,7 @@ fn render_statusbar(app: &App, frame: &mut Frame, area: Rect) {
         )
     };
     let info = Span::raw(format!(
-        "  tick:{:>10}  speed:{:>7}x/frame  [p]ause  [s]tep  [+/-]speed  [\u{2191}\u{2193}]select  [q]uit",
+        "  tick:{:>10}  speed:{:>7}x/frame  [p]ause  [s]tep  [+/-]speed  [\u{2191}\u{2193}]select  [e]nergy  [q]uit",
         app.world.tick, app.steps_per_frame,
     ));
     let line = Line::from(vec![status, info]);
@@ -302,7 +336,7 @@ fn render(app: &mut App, frame: &mut Frame) {
     let list_area = main_chunks[1];
 
     render_statusbar(app, frame, status_area);
-    render_memory(&app.world, frame, memory_area);
+    render_memory(&app.world, app.energy_overlay, frame, memory_area);
     render_program_list(app, frame, list_area);
     render_inspector(&app.world, app.selected_id, frame, inspector_area);
 }
@@ -337,6 +371,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) -> i
                     }
                     KeyCode::Char('+') | KeyCode::Char('=') => app.speed_up(),
                     KeyCode::Char('-') => app.speed_down(),
+                    KeyCode::Char('e') => app.energy_overlay = !app.energy_overlay,
                     KeyCode::Down => app.select_next(),
                     KeyCode::Up => app.select_prev(),
                     _ => {}

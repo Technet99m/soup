@@ -67,6 +67,15 @@ impl World {
         self.tick += 1;
         let mut events = Vec::new();
 
+        // Periodic energy map decay: subtract energy_decay_rate from every deposit.
+        let interval = self.config.energy_decay_interval;
+        if interval > 0 && self.tick % interval == 0 {
+            let rate = self.config.energy_decay_rate;
+            for cell in self.memory.energy_map.iter_mut() {
+                *cell = cell.saturating_sub(rate);
+            }
+        }
+
         // Pop the next program ID (skipping dead ones lazily).
         let id = loop {
             match self.queue.pop_front() {

@@ -12,6 +12,10 @@ pub struct Config {
     pub loop_max_depth: usize,
     pub ticks_per_stat_log: u64,
     pub rng_seed: u64,
+    /// Amount subtracted from each energy deposit per decay event. Default: 1.
+    pub energy_decay_rate: u32,
+    /// How many ticks between decay sweeps of the energy map. Default: 100.
+    pub energy_decay_interval: u64,
     #[serde(skip)]
     pub log_path: PathBuf,
 }
@@ -27,6 +31,8 @@ impl Default for Config {
             loop_max_depth: 8,
             ticks_per_stat_log: 10_000,
             rng_seed: 42,
+            energy_decay_rate: 1,
+            energy_decay_interval: 100,
             log_path: PathBuf::from("soup.log"),
         }
     }
@@ -51,6 +57,8 @@ impl Config {
                 c.loop_max_depth = file_cfg.loop_max_depth;
                 c.ticks_per_stat_log = file_cfg.ticks_per_stat_log;
                 c.rng_seed = file_cfg.rng_seed;
+                c.energy_decay_rate = file_cfg.energy_decay_rate;
+                c.energy_decay_interval = file_cfg.energy_decay_interval;
             }
         }
 
@@ -70,7 +78,9 @@ impl Config {
         parse_env!(commit_cost,        "COMMIT_COST");
         parse_env!(loop_max_depth,     "LOOP_MAX_DEPTH");
         parse_env!(ticks_per_stat_log, "TICKS_PER_STAT_LOG");
-        parse_env!(rng_seed,           "RNG_SEED");
+        parse_env!(rng_seed,              "RNG_SEED");
+        parse_env!(energy_decay_rate,     "ENERGY_DECAY_RATE");
+        parse_env!(energy_decay_interval, "ENERGY_DECAY_INTERVAL");
         if let Ok(v) = std::env::var("LOG_PATH") {
             c.log_path = PathBuf::from(v);
         }

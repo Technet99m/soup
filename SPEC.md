@@ -13,6 +13,7 @@ A digital life simulation where self-replicating bytecode programs evolve inside
 - Memory is **circular** — address arithmetic wraps around
 - Programs occupy contiguous slices: `[start, start + length)`
 - A separate **program registry** maps program IDs to `{ start, length, age, energy }`
+- A parallel **energy map** (`[u32; 65536]`) holds deposited energy per cell, independent of instruction bytes. Programs can deposit energy (GIVE_ENERGY) for children or for themselves across cycles; other programs can sense (SENSE_ENERGY) and drain (TAKE_ENERGY) these deposits — enabling parasitic behavior to emerge.
 
 ---
 
@@ -52,7 +53,10 @@ Every possible byte value must map to a valid instruction. Group them:
 | 27 | `SPLIT` | Like COMMIT but immediately gives child half of remaining energy |
 | 28 | `SCAN_FWD` | Scan forward until cell == A, put found address in B |
 | 29 | `SCAN_BWD` | Scan backward until cell == A, put found address in B |
-| 30–254 | `NOP_*` | All treated as NOP (mutation-safe padding) |
+| 30 | `GIVE_ENERGY` | Deposit register B energy from own pool into energy map at write head. Costs 1 base + energy given. |
+| 31 | `TAKE_ENERGY` | Drain all energy from energy map at read head into own pool. Costs 1 base. |
+| 32 | `SENSE_ENERGY` | Load energy map value at read head into register B (saturating at 65535). Costs 1 base. |
+| 33–254 | `NOP_*` | All treated as NOP (mutation-safe padding) |
 | 255 | `HALT` | Stop execution immediately |
 
 ---

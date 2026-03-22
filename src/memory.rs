@@ -4,11 +4,17 @@ use rand::Rng;
 /// over the 64 KiB boundary is automatic and free.
 pub struct Memory {
     cells: [u8; 65536],
+    /// Per-cell energy deposits. Programs can store energy here via GIVE_ENERGY
+    /// and drain it via TAKE_ENERGY. Independent of the byte instruction value.
+    pub energy_map: Box<[u32; 65536]>,
 }
 
 impl Memory {
     pub fn new() -> Self {
-        Self { cells: [0u8; 65536] }
+        Self {
+            cells: [0u8; 65536],
+            energy_map: Box::new([0u32; 65536]),
+        }
     }
 
     #[inline]
@@ -78,6 +84,26 @@ impl Memory {
             .collect()
     }
 
+    /// Deposit `amount` energy at `addr`, accumulating any existing deposit.
+    #[inline]
+    pub fn give_energy(&mut self, addr: u16, amount: u32) {
+        self.energy_map[addr as usize] = self.energy_map[addr as usize].saturating_add(amount);
+    }
+
+    /// Drain all deposited energy at `addr`, returning the amount taken.
+    #[inline]
+    pub fn take_energy(&mut self, addr: u16) -> u32 {
+        let amount = self.energy_map[addr as usize];
+        self.energy_map[addr as usize] = 0;
+        amount
+    }
+
+    /// Read deposited energy at `addr` without consuming it.
+    #[inline]
+    pub fn sense_energy(&self, addr: u16) -> u32 {
+        self.energy_map[addr as usize]
+    }
+
     /// Expose the raw cells for visualization / stats.
     pub fn as_bytes(&self) -> &[u8; 65536] {
         &self.cells
@@ -106,6 +132,40 @@ mod tests {
         let mut m = Memory::new();
         m.place(10, &[1, 2, 3, 4]);
         assert_eq!(m.read_slice(10, 4), vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn give_take_energy() {
+        let mut m = Memory::new();
+        assert_eq!(m.sense_energy(10), 0);
+        m.give_energy(10, 500);
+        assert_eq!(m.sense_energy(10), 500);
+        // Accumulates
+        m.give_energy(10, 300);
+        assert_eq!(m.sense_energy(10), 800);
+        // Take drains
+        let taken = m.take_energy(10);
+        assert_eq!(taken, 800);
+        assert_eq!(m.sense_energy(10), 0);
+        // Double-take returns 0
+        assert_eq!(m.take_energy(10), 0);
+    }
+
+    #[test]
+    fn give_energy_saturates() {
+        let mut m = Memory::new();
+        m.give_energy(0, u32::MAX);
+        m.give_energy(0, 1); // should not overflow
+        assert_eq!(m.sense_energy(0), u32::MAX);
+    }
+
+    #[test]
+    fn energy_map_independent_of_cells() {
+        let mut m = Memory::new();
+        m.write(5, 42);
+        m.give_energy(5, 100);
+        assert_eq!(m.read(5), 42);     // instruction unchanged
+        assert_eq!(m.sense_energy(5), 100);
     }
 
     #[test]

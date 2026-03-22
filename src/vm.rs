@@ -266,6 +266,28 @@ pub fn step(
             }
         }
 
+        // --- Energy transfer ---
+        // GIVE_ENERGY: deposit reg_b energy from own pool into energy_map[wh].
+        // The deposited amount is capped at (own_energy - 1) to ensure at least
+        // 1 energy remains after the base cost is already deducted above.
+        // The base cost of 1 was already deducted, so p.energy is the remaining budget.
+        Opcode::GiveEnergy => {
+            let amount = (p.reg_b as u32).min(p.energy);
+            mem.give_energy(p.wh, amount);
+            p.energy -= amount;
+        }
+
+        // TAKE_ENERGY: drain all energy from energy_map[rh] into own pool.
+        Opcode::TakeEnergy => {
+            let gained = mem.take_energy(p.rh);
+            p.energy = p.energy.saturating_add(gained);
+        }
+
+        // SENSE_ENERGY: read energy_map[rh] into reg_b (saturating at u16::MAX).
+        Opcode::SenseEnergy => {
+            p.reg_b = mem.sense_energy(p.rh).min(u16::MAX as u32) as u16;
+        }
+
         // --- Scanning ---
         // SCAN_FWD: scan forward (wrapping) from RH for up to 65536 cells looking
         // for the byte equal to reg_a.  On match, set reg_b = address found.
@@ -469,6 +491,75 @@ mod tests {
             "Child memory at {} should be an exact copy of SEED",
             child_start
         );
+    }
+
+    #[test]
+    fn give_energy_deposits_and_costs() {
+        // LOAD_IMM(12) 50, SWAP(17) — put 50 into reg_b
+        // GIVE_ENERGY(30) — deposit reg_b=50 at wh=0
+        // HALT(255)
+        let code = [12u8, 50, 17, 30, 255];
+        let (mut p, mut mem, mut fl) = make_program(&code, 500);
+        let cfg = Config::default();
+        let mut next_id: ProgramId = 100;
+        let mut rng = StdRng::seed_from_u64(0);
+        let mut events = Vec::new();
+        for _ in 0..100 {
+            match step(&mut p, &mut mem, &mut fl, &cfg, &mut next_id, &mut rng, &mut events, 0) {
+                StepResult::Continue => {}
+                _ => break,
+            }
+        }
+        // reg_b should be 50 (set by LOAD_IMM+SWAP)
+        assert_eq!(p.reg_b, 50);
+        // energy_map at wh=0 should have 50 deposited
+        assert_eq!(mem.sense_energy(0), 50);
+        // program paid: 4 base costs (4 instructions before HALT) + 50 deposited
+        assert_eq!(p.energy, 500 - 4 - 50);
+    }
+
+    #[test]
+    fn take_energy_absorbs_deposit() {
+        // Pre-deposit 200 energy at address 0 in memory
+        // TAKE_ENERGY(31) — rh=0 by default, drains energy_map[0]
+        // HALT(255)
+        let code = [31u8, 255];
+        let (mut p, mut mem, mut fl) = make_program(&code, 100);
+        mem.give_energy(0, 200);
+        let cfg = Config::default();
+        let mut next_id: ProgramId = 100;
+        let mut rng = StdRng::seed_from_u64(0);
+        let mut events = Vec::new();
+        for _ in 0..100 {
+            match step(&mut p, &mut mem, &mut fl, &cfg, &mut next_id, &mut rng, &mut events, 0) {
+                StepResult::Continue => {}
+                _ => break,
+            }
+        }
+        // 100 - 1 (TAKE_ENERGY base) + 200 (absorbed) - 1 (HALT base)
+        assert_eq!(p.energy, 298);
+        assert_eq!(mem.sense_energy(0), 0);
+    }
+
+    #[test]
+    fn sense_energy_loads_into_reg_b() {
+        // Pre-deposit 1500 at address 0; SENSE_ENERGY reads it into reg_b (saturated to u16)
+        let code = [32u8, 255]; // SENSE_ENERGY, HALT
+        let (mut p, mut mem, mut fl) = make_program(&code, 100);
+        mem.give_energy(0, 1500);
+        let cfg = Config::default();
+        let mut next_id: ProgramId = 100;
+        let mut rng = StdRng::seed_from_u64(0);
+        let mut events = Vec::new();
+        for _ in 0..100 {
+            match step(&mut p, &mut mem, &mut fl, &cfg, &mut next_id, &mut rng, &mut events, 0) {
+                StepResult::Continue => {}
+                _ => break,
+            }
+        }
+        assert_eq!(p.reg_b, 1500);
+        // Deposit unchanged by SENSE
+        assert_eq!(mem.sense_energy(0), 1500);
     }
 
     #[test]
