@@ -7,5 +7,6 @@ pub mod opcode;
 pub mod program;
 pub mod seed;
 pub mod stats;
+pub mod template;
 pub mod vm;
 pub mod world;

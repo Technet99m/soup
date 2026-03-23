@@ -41,7 +41,7 @@ pub const SEED: [u8; 32] = [
     11,   // [21] SET_WRITE_HEAD    — WH = B (child_start; reg_b unchanged after COMMIT)
     12,   // [22] LOAD_IMM
     100,  // [23]   A = 100         — energy gift for child
-    17,   // [24] SWAP              — reg_b = 100, reg_a = low byte of old reg_b
+    17,   // [24] SWAP              — reg_b = 100, reg_a = old reg_b
     30,   // [25] GIVE_ENERGY       — deposit reg_b=100 at WH=child_start
     80,   // [26] NOP               — padding
     90,   // [27] NOP               — padding

@@ -14,8 +14,8 @@ pub struct Program {
     pub length: u16,
     /// Instruction pointer (absolute address).
     pub ip: u16,
-    /// General-purpose register (u8).
-    pub reg_a: u8,
+    /// General-purpose register (u16).
+    pub reg_a: u16,
     /// Address register (u16).
     pub reg_b: u16,
     /// Read head (u16).
@@ -35,6 +35,9 @@ pub struct Program {
     pub parent_lineage_id: Option<Uuid>,
     /// Numeric parent ID for fast lookup.
     pub parent_id: Option<ProgramId>,
+    /// Index into the startup template list, if this program descends from a seed template.
+    /// Children inherit parent's template_id.
+    pub template_id: Option<u8>,
 }
 
 impl Program {
@@ -45,6 +48,7 @@ impl Program {
         energy: u32,
         parent_id: Option<ProgramId>,
         parent_lineage_id: Option<Uuid>,
+        template_id: Option<u8>,
     ) -> Self {
         Self {
             id,
@@ -61,6 +65,7 @@ impl Program {
             lineage_id: Uuid::new_v4(),
             parent_lineage_id,
             parent_id,
+            template_id,
         }
     }
 
@@ -82,14 +87,14 @@ mod tests {
 
     #[test]
     fn new_program_ip_at_start() {
-        let p = Program::new(1, 100, 50, 200, None, None);
+        let p = Program::new(1, 100, 50, 200, None, None, None);
         assert_eq!(p.ip, 100);
         assert_eq!(p.ip_offset(), 0);
     }
 
     #[test]
     fn owns_address() {
-        let p = Program::new(1, 100, 50, 200, None, None);
+        let p = Program::new(1, 100, 50, 200, None, None, None);
         assert!(p.owns(100));
         assert!(p.owns(149));
         assert!(!p.owns(150));

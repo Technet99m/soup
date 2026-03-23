@@ -2,7 +2,7 @@ use rand::Rng;
 use crate::{
     allocator::FreeList,
     config::Config,
-    events::{DeathCause, Event},
+    events::Event,
     memory::Memory,
     opcode::Opcode,
     program::{Program, ProgramId},
@@ -81,15 +81,15 @@ pub fn step(
         }
 
         // --- Memory I/O ---
-        Opcode::Read => p.reg_a = mem.read(p.rh),
+        Opcode::Read => p.reg_a = mem.read(p.rh) as u16,
 
         Opcode::Write => {
-            let (stored, mutated) = mem.write_mutating(p.wh, p.reg_a, rng, cfg.mutation_rate);
+            let (stored, mutated) = mem.write_mutating(p.wh, (p.reg_a & 0xFF) as u8, rng, cfg.mutation_rate);
             if mutated {
                 events.push(Event::Mutated {
                     tick,
                     address: p.wh,
-                    old_value: p.reg_a,
+                    old_value: (p.reg_a & 0xFF) as u8,
                     new_value: stored,
                 });
             }
@@ -116,50 +116,49 @@ pub fn step(
         // LOAD_IMM reads the byte immediately following the opcode in memory,
         // stores it in reg_a, and advances IP by 2 (opcode + immediate byte).
         Opcode::LoadImm => {
-            p.reg_a = mem.read(ip.wrapping_add(1));
+            p.reg_a = mem.read(ip.wrapping_add(1)) as u16;
             ip_next = ip.wrapping_add(2);
         }
 
         // --- Arithmetic ---
-        // ADD/SUB truncate reg_b to u8 before operating on reg_a.
-        Opcode::Add => p.reg_a = p.reg_a.wrapping_add(p.reg_b as u8),
-        Opcode::Sub => p.reg_a = p.reg_a.wrapping_sub(p.reg_b as u8),
+        Opcode::Add => p.reg_a = p.reg_a.wrapping_add(p.reg_b),
+        Opcode::Sub => p.reg_a = p.reg_a.wrapping_sub(p.reg_b),
         Opcode::Inc => p.reg_a = p.reg_a.wrapping_add(1),
         Opcode::Dec => p.reg_a = p.reg_a.wrapping_sub(1),
 
-        // SWAP: reg_a ← low byte of reg_b, reg_b ← old reg_a.
+        // SWAP: exchange reg_a and reg_b.
         Opcode::Swap => {
             let old_a = p.reg_a;
-            p.reg_a = (p.reg_b & 0xFF) as u8;
-            p.reg_b = old_a as u16;
+            p.reg_a = p.reg_b;
+            p.reg_b = old_a;
         }
 
         // --- Jumps ---
-        // JMP: absolute jump to reg_a (u8 → only addresses 0..=255 reachable).
+        // JMP: absolute jump to reg_a.
         Opcode::Jmp => {
-            ip_next = p.reg_a as u16;
+            ip_next = p.reg_a;
         }
 
         // JMP_FWD: ip_next = (ip + 1) + reg_a.  A=0 is a no-op.
         Opcode::JmpFwd => {
-            ip_next = ip.wrapping_add(1).wrapping_add(p.reg_a as u16);
+            ip_next = ip.wrapping_add(1).wrapping_add(p.reg_a);
         }
 
         // JMP_BWD: ip_next = (ip + 1) - reg_a.  A=0 is a no-op.
         Opcode::JmpBwd => {
-            ip_next = ip.wrapping_add(1).wrapping_sub(p.reg_a as u16);
+            ip_next = ip.wrapping_add(1).wrapping_sub(p.reg_a);
         }
 
         // Conditional jumps test reg_b (NOT reg_a).  Distance in reg_a.
         // If condition true: ip_next = (ip+1) + reg_a, else ip_next = ip+1.
         Opcode::JmpIfZero => {
             if p.reg_b == 0 {
-                ip_next = ip.wrapping_add(1).wrapping_add(p.reg_a as u16);
+                ip_next = ip.wrapping_add(1).wrapping_add(p.reg_a);
             }
         }
         Opcode::JmpIfNonzero => {
             if p.reg_b != 0 {
-                ip_next = ip.wrapping_add(1).wrapping_add(p.reg_a as u16);
+                ip_next = ip.wrapping_add(1).wrapping_add(p.reg_a);
             }
         }
 
@@ -204,7 +203,7 @@ pub fn step(
             if p.energy >= cfg.alloc_cost {
                 p.energy -= cfg.alloc_cost;
                 if p.reg_a > 0 {
-                    if let Some(addr) = fl.alloc(p.reg_a as u16) {
+                    if let Some(addr) = fl.alloc(p.reg_a) {
                         p.reg_b = addr;
                     }
                     // No fitting block: reg_b unchanged, but extra cost already paid.
@@ -216,7 +215,7 @@ pub fn step(
         // --- Reproduction ---
         Opcode::Commit => {
             let child_start = p.reg_b;
-            let child_len = p.reg_a as u16;
+            let child_len = p.reg_a;
             if child_len > 0
                 && p.energy >= cfg.commit_cost
                 && !fl.is_free(child_start, child_len)
@@ -231,6 +230,7 @@ pub fn step(
                     cfg.initial_energy,
                     Some(p.id),
                     Some(p.lineage_id),
+                    p.template_id,
                 );
                 p.ip = ip_next;
                 p.age += 1;
@@ -241,7 +241,7 @@ pub fn step(
 
         Opcode::Split => {
             let child_start = p.reg_b;
-            let child_len = p.reg_a as u16;
+            let child_len = p.reg_a;
             if child_len > 0
                 && p.energy >= cfg.commit_cost
                 && !fl.is_free(child_start, child_len)
@@ -259,6 +259,7 @@ pub fn step(
                     child_energy,
                     Some(p.id),
                     Some(p.lineage_id),
+                    p.template_id,
                 );
                 p.ip = ip_next;
                 p.age += 1;
@@ -288,12 +289,17 @@ pub fn step(
             p.reg_b = mem.sense_energy(p.rh).min(u16::MAX as u32) as u16;
         }
 
+        // MEASURE_SELF: copy the program's tracked length into reg_a.
+        Opcode::MeasureSelf => {
+            p.reg_a = p.length;
+        }
+
         // --- Scanning ---
         // SCAN_FWD: scan forward (wrapping) from RH for up to 65536 cells looking
         // for the byte equal to reg_a.  On match, set reg_b = address found.
         // If not found, reg_b is unchanged.
         Opcode::ScanFwd => {
-            let target = p.reg_a;
+            let target = (p.reg_a & 0xFF) as u8;
             for i in 0..65536u32 {
                 let addr = p.rh.wrapping_add(i as u16);
                 if mem.read(addr) == target {
@@ -305,7 +311,7 @@ pub fn step(
 
         // SCAN_BWD: same as SCAN_FWD but scanning backward.
         Opcode::ScanBwd => {
-            let target = p.reg_a;
+            let target = (p.reg_a & 0xFF) as u8;
             for i in 0..65536u32 {
                 let addr = p.rh.wrapping_sub(i as u16);
                 if mem.read(addr) == target {
@@ -341,7 +347,15 @@ mod tests {
         let mut mem = Memory::new();
         mem.place(0, code);
         let fl = FreeList::new(code.len() as u16, 0u16.wrapping_sub(code.len() as u16));
-        let p = Program::new(1, 0, code.len() as u16, energy, None, None);
+        let p = Program::new(1, 0, code.len() as u16, energy, None, None, None);
+        (p, mem, fl)
+    }
+
+    fn make_program_with_length(code: &[u8], tracked_len: u16, energy: u32) -> (Program, Memory, FreeList) {
+        let mut mem = Memory::new();
+        mem.place(0, code);
+        let fl = FreeList::new(tracked_len, 0u16.wrapping_sub(tracked_len));
+        let p = Program::new(1, 0, tracked_len, energy, None, None, None);
         (p, mem, fl)
     }
 
@@ -408,17 +422,27 @@ mod tests {
 
     #[test]
     fn arithmetic_wrapping() {
-        // LOAD_IMM(12) 255, INC(15), HALT(255)
-        // 255 + 1 wraps to 0
-        let (p, _, _) = run_to_end(&[12, 255, 15, 255], 10);
-        assert_eq!(p.reg_a, 0);
+        // LOAD_IMM(12) 255, SWAP(17), LOAD_IMM(12) 1, ADD(13), HALT(255)
+        // A starts at 255, B set to 255 via SWAP then A reset to 1. 1 + 255 = 256.
+        let (p, _, _) = run_to_end(&[12, 255, 17, 12, 1, 13, 255], 20);
+        assert_eq!(p.reg_a, 256);
+
+        // Verify full u16 wrapping: 65535 + 1 => 0
+        let (mut p2, mut mem2, mut fl2) = make_program(&[15, 255], 10);
+        p2.reg_a = u16::MAX;
+        let cfg = Config::default();
+        let mut next_id: ProgramId = 100;
+        let mut rng = StdRng::seed_from_u64(0);
+        let mut events = Vec::new();
+        let _ = step(&mut p2, &mut mem2, &mut fl2, &cfg, &mut next_id, &mut rng, &mut events, 0);
+        assert_eq!(p2.reg_a, 0);
     }
 
     #[test]
     fn swap_exchanges_registers() {
         // LOAD_IMM(12) 42, SWAP(17), HALT(255)
         // Before SWAP: A=42, B=0
-        // After  SWAP: A=(0 & 0xFF)=0, B=42
+        // After SWAP: A=0, B=42
         let (p, _, _) = run_to_end(&[12, 42, 17, 255], 10);
         assert_eq!(p.reg_a, 0);
         assert_eq!(p.reg_b, 42);
@@ -461,7 +485,7 @@ mod tests {
         mem.place(0, &SEED);
         let mut fl = FreeList::new(SEED.len() as u16, 0u16.wrapping_sub(SEED.len() as u16));
         let cfg = Config::default();
-        let mut p = Program::new(1, 0, SEED.len() as u16, 1000, None, None);
+        let mut p = Program::new(1, 0, SEED.len() as u16, 1000, None, None, None);
 
         let mut next_id: ProgramId = 100;
         let mut rng = StdRng::seed_from_u64(0);
@@ -578,7 +602,7 @@ mod tests {
         mem.write(5, 99);
         let mut fl = FreeList::new(10, 65526);
         let cfg = Config::default();
-        let mut p = Program::new(1, 0, 4, 1000, None, None);
+        let mut p = Program::new(1, 0, 4, 1000, None, None, None);
         // Place RH at address 4 so the scan starts past the code and finds only
         // the explicitly written 99 at address 5.
         p.rh = 4;
@@ -593,5 +617,44 @@ mod tests {
             }
         }
         assert_eq!(p.reg_b, 5);
+    }
+
+    #[test]
+    fn measure_self_loads_tracked_program_length() {
+        // MEASURE_SELF(33), HALT(255)
+        let (p, _, result) = run_to_end(&[33, 255], 20);
+        assert!(matches!(result, StepResult::Halted));
+        assert_eq!(p.reg_a, 2);
+    }
+
+    #[test]
+    fn measure_self_adjust_size_and_spawn_large_child() {
+        // Program tracked length is 300 bytes (larger than 255), while code itself
+        // is short. MEASURE_SELF uses tracked metadata, then DEC requests 299 bytes.
+        // Flow: MEASURE_SELF, DEC, ALLOC, COMMIT
+        let code = [33u8, 16, 25, 26, 255];
+        let (mut p, mut mem, mut fl) = make_program_with_length(&code, 300, 1_000);
+        let cfg = Config::default();
+        let mut next_id: ProgramId = 100;
+        let mut rng = StdRng::seed_from_u64(0);
+        let mut events = Vec::new();
+
+        let mut result = StepResult::Continue;
+        for _ in 0..1_000 {
+            result = step(&mut p, &mut mem, &mut fl, &cfg, &mut next_id, &mut rng, &mut events, 0);
+            if !matches!(result, StepResult::Continue) {
+                break;
+            }
+        }
+
+        match result {
+            StepResult::Spawned(child) => {
+                assert_eq!(p.reg_a, 299);
+                assert_eq!(child.length, 299);
+                assert_eq!(child.start, p.reg_b);
+                assert!(child.length > 255);
+            }
+            other => panic!("expected Spawned, got {other:?}"),
+        }
     }
 }

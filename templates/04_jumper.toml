@@ -1,0 +1,17 @@
+name = "jumper"
+description = "Uses JMP_IF_ZERO + DEC for the copy loop instead of LOOP_OPEN/LOOP_CLOSE. Counter lives in reg_b; SWAP shuttles it in/out of reg_a for DEC. Exposes different mutation targets."
+# 31 bytes:
+# [0]  SEEK_SELF_START   [1]  TAKE_ENERGY
+# [2]  LOAD_IMM [3] 31   [4]  ALLOC  [5]  SET_WRITE_HEAD
+# [6]  SEEK_SELF_START   [7]  LOAD_IMM [8] 31  [9] SWAP → reg_b=31 counter
+# loop_start [10]:
+# [10] COPY
+# [11] SWAP (reg_a=counter)  [12] DEC (counter--)  [13] SWAP (reg_b=counter-1)
+# [14] LOAD_IMM [15] 3   exit_offset for JMP_IF_ZERO
+# [16] JMP_IF_ZERO → if reg_b==0: ip=17+3=20(exit); else fall to [17]
+# [17] LOAD_IMM [18] 10  [19] JMP_BWD → 20-10=10 ✓ (loop back)
+# exit [20]:
+# [20] LOAD_IMM [21] 31  [22] COMMIT  [23] SET_WRITE_HEAD
+# [24] LOAD_IMM [25] 100 [26] SWAP [27] GIVE_ENERGY
+# [28] LOAD_IMM [29] 31  [30] JMP_BWD → 31-31=0 ✓
+bytes = [5, 31, 12, 31, 25, 11, 5, 12, 31, 17, 10, 17, 16, 17, 12, 3, 21, 12, 10, 20, 12, 31, 26, 11, 12, 100, 17, 30, 12, 31, 20]

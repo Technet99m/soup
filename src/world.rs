@@ -6,7 +6,7 @@ use crate::{
     events::{DeathCause, Event},
     memory::Memory,
     program::{Program, ProgramId},
-    seed::{SEED, SEED_LEN},
+    template,
     vm::{self, StepResult},
 };
 
@@ -21,33 +21,81 @@ pub struct World {
     pub tick: u64,
     next_id: ProgramId,
     rng: StdRng,
+    /// Names of the startup templates, indexed by template_id.
+    pub template_names: Vec<String>,
+}
+
+/// Build a FreeList covering all memory NOT occupied by the given placements.
+/// `placements` is a slice of (start, len) pairs (need not be sorted).
+/// `total` is the total address space size (65536).
+fn make_free_list(total: u32, placements: &[(u16, u16)]) -> FreeList {
+    let mut sorted = placements.to_vec();
+    sorted.sort_by_key(|&(s, _)| s);
+
+    let mut fl = FreeList::new(0, 0); // start empty
+
+    let n = sorted.len();
+
+    // Gap before first placement
+    if n > 0 && sorted[0].0 > 0 {
+        fl.free(0, sorted[0].0);
+    }
+
+    // Gaps between placements and after the last one
+    for i in 0..n {
+        let (start, len) = sorted[i];
+        let occupied_end = start as u32 + len as u32;
+        let next: u32 = if i + 1 < n {
+            sorted[i + 1].0 as u32
+        } else {
+            total
+        };
+        if next > occupied_end {
+            let gap_start = occupied_end as u16;
+            let gap_len = (next - occupied_end) as u16; // safe: max gap < 65536
+            fl.free(gap_start, gap_len);
+        }
+    }
+
+    fl
 }
 
 impl World {
-    /// Create a new World and place the seed program at address 0.
+    /// Create a new World, loading templates and placing each at evenly spaced addresses.
     pub fn new(config: Config) -> Self {
+        let templates = template::load_templates(&config.templates_dir);
+        let num = templates.len();
+        let stride = 65536u32 / num as u32;
+
         let mut memory = Memory::new();
-        memory.place(0, &SEED);
+        let mut placements: Vec<(u16, u16)> = Vec::with_capacity(num);
 
-        // Free list covers everything after the seed.
-        let free_start = SEED_LEN;
-        let free_len = u16::MAX - SEED_LEN + 1; // 65536 - SEED_LEN
-        let free_list = FreeList::new(free_start, free_len);
+        for (i, tmpl) in templates.iter().enumerate() {
+            let addr = (i as u32 * stride) as u16;
+            memory.place(addr, &tmpl.bytes);
+            placements.push((addr, tmpl.bytes.len() as u16));
+        }
 
-        let seed_program = Program::new(
-            0,
-            0,
-            SEED_LEN,
-            config.initial_energy,
-            None,
-            None,
-        );
+        let free_list = make_free_list(65536, &placements);
 
         let mut programs = HashMap::new();
-        programs.insert(0, seed_program);
-
         let mut queue = VecDeque::new();
-        queue.push_back(0u32);
+
+        for (i, &(start, len)) in placements.iter().enumerate() {
+            let prog = Program::new(
+                i as ProgramId,
+                start,
+                len,
+                config.initial_energy,
+                None,
+                None,
+                Some(i as u8),
+            );
+            programs.insert(i as ProgramId, prog);
+            queue.push_back(i as ProgramId);
+        }
+
+        let template_names = templates.into_iter().map(|t| t.name).collect();
 
         World {
             memory,
@@ -57,7 +105,8 @@ impl World {
             rng: StdRng::seed_from_u64(config.rng_seed),
             config,
             tick: 0,
-            next_id: 1,
+            next_id: num as ProgramId,
+            template_names,
         }
     }
 
@@ -167,22 +216,29 @@ impl World {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+
+    /// Config that skips the templates directory so tests always fall back to the
+    /// hardcoded SEED (single program, deterministic initial state).
+    fn seed_config() -> Config {
+        let mut cfg = Config::default();
+        cfg.templates_dir = PathBuf::from("/nonexistent_soup_test_templates");
+        cfg
+    }
 
     #[test]
     fn world_initializes_with_seed() {
-        let cfg = Config::default();
-        let world = World::new(cfg);
+        let world = World::new(seed_config());
         assert_eq!(world.live_count(), 1);
         assert!(world.memory_utilization() > 0.0);
-        // Seed occupies 15 bytes out of 65536
+        // Seed (looper) is 32 bytes out of 65536
         let expected_util = crate::seed::SEED_LEN as f64 / 65536.0;
         assert!((world.memory_utilization() - expected_util).abs() < 0.0001);
     }
 
     #[test]
     fn tick_advances_tick_counter() {
-        let cfg = Config::default();
-        let mut world = World::new(cfg);
+        let mut world = World::new(seed_config());
         world.tick();
         assert_eq!(world.tick, 1);
         world.tick();
@@ -193,7 +249,7 @@ mod tests {
     fn seed_eventually_dies_without_replication() {
         // With very low energy the seed cannot afford ALLOC or COMMIT,
         // so it runs out of energy and dies without replicating.
-        let mut cfg = Config::default();
+        let mut cfg = seed_config();
         cfg.initial_energy = 5; // too little to reach COMMIT
         let mut world = World::new(cfg);
 
@@ -216,7 +272,7 @@ mod tests {
     #[test]
     fn seed_replicates_at_least_once() {
         // With enough energy and free memory, seed should COMMIT at least one child.
-        let mut cfg = Config::default();
+        let mut cfg = seed_config();
         cfg.initial_energy = 10_000; // plenty of energy
         let mut world = World::new(cfg);
 
@@ -241,7 +297,7 @@ mod tests {
     #[test]
     fn mutation_events_are_emitted() {
         // Use mutation_rate = 1.0 to guarantee every write mutates
-        let mut cfg = Config::default();
+        let mut cfg = seed_config();
         cfg.mutation_rate = 1.0;
         cfg.initial_energy = 10_000;
         let mut world = World::new(cfg);
@@ -268,7 +324,7 @@ mod tests {
     fn second_generation_replicates() {
         // Verify that children can themselves produce grandchildren.
         // This validates the full replication cycle.
-        let mut cfg = Config::default();
+        let mut cfg = seed_config();
         cfg.initial_energy = 50_000;
         cfg.mutation_rate = 0.0; // no mutation — pure replication test
         let mut world = World::new(cfg);
@@ -302,7 +358,7 @@ mod tests {
     #[test]
     fn dead_ids_cleaned_lazily() {
         // After a program dies, subsequent ticks should not panic
-        let mut cfg = Config::default();
+        let mut cfg = seed_config();
         cfg.initial_energy = 50;
         let mut world = World::new(cfg);
         // Run well past death

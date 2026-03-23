@@ -1,0 +1,10 @@
+name = "splitter"
+description = "Uses SPLIT instead of COMMIT — parent and child share energy equally on each reproduction. Shorter program, faster generational turnover."
+# 18 bytes:
+# [0]  SEEK_SELF_START   [1]  TAKE_ENERGY
+# [2]  LOAD_IMM [3] 18   [4]  ALLOC  [5]  SET_WRITE_HEAD
+# [6]  SEEK_SELF_START   [7]  LOAD_IMM [8] 18
+# [9]  LOOP_OPEN  [10] COPY  [11] LOOP_CLOSE
+# [12] LOAD_IMM [13] 18  [14] SPLIT
+# [15] LOAD_IMM [16] 18  [17] JMP_BWD → 18-18=0 ✓
+bytes = [5, 31, 12, 18, 25, 11, 5, 12, 18, 23, 10, 24, 12, 18, 27, 12, 18, 20]

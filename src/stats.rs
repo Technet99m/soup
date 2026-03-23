@@ -78,7 +78,9 @@ mod tests {
 
     #[test]
     fn snapshot_from_fresh_world() {
-        let cfg = Config::default();
+        use std::path::PathBuf;
+        let mut cfg = Config::default();
+        cfg.templates_dir = PathBuf::from("/nonexistent_soup_test_templates");
         let world = World::new(cfg);
         let snap = StatsSnapshot::compute(&world);
 
@@ -86,7 +88,7 @@ mod tests {
         assert_eq!(snap.tick, 0);
         assert!(snap.memory_utilization > 0.0);
         assert!(snap.oldest_age == 0);
-        // Seed has 15 bytes, histogram total should be 15
+        // Looper (fallback SEED) is 32 bytes; histogram total should equal its length
         let total: u64 = snap.instruction_histogram.iter().sum();
         assert_eq!(total, crate::seed::SEED_LEN as u64);
     }

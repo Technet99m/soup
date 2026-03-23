@@ -1,0 +1,13 @@
+name = "measurer"
+description = "Uses MEASURE_SELF instead of hardcoded length for ALLOC, loop count, and COMMIT. More resilient to size mutations; offspring of different sizes still replicate correctly."
+# 20 bytes:
+# [0]  SEEK_SELF_START   [1]  TAKE_ENERGY
+# [2]  MEASURE_SELF → A = own_len (ALLOC size)
+# [3]  ALLOC             [4]  SET_WRITE_HEAD
+# [5]  SEEK_SELF_START   [6]  MEASURE_SELF → A = own_len (loop counter)
+# [7]  LOOP_OPEN         [8]  COPY          [9]  LOOP_CLOSE
+# [10] MEASURE_SELF → A = own_len (COMMIT size)
+# [11] COMMIT            [12] SET_WRITE_HEAD (reset WH=child_start)
+# [13] LOAD_IMM [14] 100 [15] SWAP [16] GIVE_ENERGY
+# [17] LOAD_IMM [18] 20  [19] JMP_BWD → 20-20=0 ✓
+bytes = [5, 31, 33, 25, 11, 5, 33, 23, 10, 24, 33, 26, 11, 12, 100, 17, 30, 12, 20, 20]

@@ -36,6 +36,7 @@ pub enum Opcode {
     TakeEnergy,
     /// Load min(energy_map[rh], 65535) into reg_b. Costs 1 base.
     SenseEnergy,
+    MeasureSelf,
     Halt,
 }
 
@@ -75,6 +76,7 @@ impl From<u8> for Opcode {
             30  => Self::GiveEnergy,
             31  => Self::TakeEnergy,
             32  => Self::SenseEnergy,
+            33  => Self::MeasureSelf,
             255 => Self::Halt,
             _   => Self::Nop,
         }
@@ -117,6 +119,7 @@ impl From<Opcode> for u8 {
             Opcode::GiveEnergy    => 30,
             Opcode::TakeEnergy    => 31,
             Opcode::SenseEnergy   => 32,
+            Opcode::MeasureSelf   => 33,
             Opcode::Halt          => 255,
         }
     }
@@ -146,6 +149,7 @@ mod tests {
             (25,  Opcode::Alloc),
             (26,  Opcode::Commit),
             (27,  Opcode::Split),
+            (33,  Opcode::MeasureSelf),
             (255, Opcode::Halt),
         ];
         for &(byte, expected) in named {
@@ -156,7 +160,7 @@ mod tests {
 
     #[test]
     fn nop_range_decodes_as_nop() {
-        for b in 33u8..=254 {
+        for b in 34u8..=254 {
             assert_eq!(Opcode::from(b), Opcode::Nop, "byte {b} should be Nop");
         }
     }

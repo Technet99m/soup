@@ -56,7 +56,8 @@ Every possible byte value must map to a valid instruction. Group them:
 | 30 | `GIVE_ENERGY` | Deposit register B energy from own pool into energy map at write head. Costs 1 base + energy given. |
 | 31 | `TAKE_ENERGY` | Drain all energy from energy map at read head into own pool. Costs 1 base. |
 | 32 | `SENSE_ENERGY` | Load energy map value at read head into register B (saturating at 65535). Costs 1 base. |
-| 33–254 | `NOP_*` | All treated as NOP (mutation-safe padding) |
+| 33 | `MEASURE_SELF` | Load this program's registered length into register A. |
+| 34–254 | `NOP_*` | All treated as NOP (mutation-safe padding) |
 | 255 | `HALT` | Stop execution immediately |
 
 ---
@@ -67,7 +68,7 @@ Each running program has:
 
 ```text
 IP   — instruction pointer (absolute memory address)
-A    — general purpose register (u8)
+A    — general purpose / size register (u16)
 B    — address register (u16, for memory addressing)
 RH   — read head (u16)
 WH   — write head (u16)
@@ -138,6 +139,16 @@ HALT
 ```
 
 This is the primordial ancestor. Evolution takes it from here.
+
+With `MEASURE_SELF`, descendants can instead derive size dynamically:
+
+```text
+MEASURE_SELF         ; A = own registered length
+... arithmetic ...   ; optionally grow/shrink A
+ALLOC
+... copy ...
+COMMIT               ; child size comes from A
+```
 
 ---
 

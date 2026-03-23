@@ -18,7 +18,7 @@ use ratatui::{
 };
 use soup::{config::Config, world::World};
 
-/// Color palette: index 0 = free, 1–7 = program colors (cycle by ID).
+/// Color palette for program-ID coloring: index 0 = free, 1–7 = program colors (cycle by ID).
 const PALETTE: [Color; 8] = [
     Color::DarkGray,
     Color::Cyan,
@@ -30,8 +30,52 @@ const PALETTE: [Color; 8] = [
     Color::White,
 ];
 
+/// Separate fixed palette for lineage/origin coloring: index 0 = no template, 1–7 = template colors.
+const ORIGIN_PALETTE: [Color; 8] = [
+    Color::DarkGray,
+    Color::Cyan,
+    Color::Green,
+    Color::Yellow,
+    Color::Magenta,
+    Color::Red,
+    Color::Blue,
+    Color::White,
+];
+
 fn program_color(id: u32) -> Color {
     PALETTE[(id as usize % 7) + 1]
+}
+
+fn origin_color(template_id: Option<u8>) -> Color {
+    match template_id {
+        None => ORIGIN_PALETTE[0],
+        Some(id) => ORIGIN_PALETTE[(id as usize % 7) + 1],
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DisplayMode {
+    Programs,
+    Energy,
+    Origins,
+}
+
+impl DisplayMode {
+    fn next(self) -> Self {
+        match self {
+            Self::Programs => Self::Energy,
+            Self::Energy => Self::Origins,
+            Self::Origins => Self::Programs,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Programs => "programs",
+            Self::Energy => "energy",
+            Self::Origins => "origins",
+        }
+    }
 }
 
 struct App {
@@ -40,7 +84,7 @@ struct App {
     steps_per_frame: u64,
     table_state: TableState,
     selected_id: Option<u32>,
-    energy_overlay: bool,
+    display_mode: DisplayMode,
 }
 
 impl App {
@@ -53,7 +97,7 @@ impl App {
             steps_per_frame: 100,
             table_state,
             selected_id: None,
-            energy_overlay: false,
+            display_mode: DisplayMode::Programs,
         }
     }
 
@@ -105,7 +149,6 @@ impl App {
 /// Build a 65536-element array mapping each byte address to a PALETTE index.
 fn build_color_map(world: &World) -> Box<[u8; 65536]> {
     let mut map = Box::new([0u8; 65536]);
-    // Sort by ID so higher IDs (newer programs) don't obscure lower ones visually
     let mut programs: Vec<_> = world.programs.values().collect();
     programs.sort_unstable_by_key(|p| p.id);
     for p in programs {
@@ -117,13 +160,27 @@ fn build_color_map(world: &World) -> Box<[u8; 65536]> {
     map
 }
 
+/// Build a 65536-element array mapping each byte address to an ORIGIN_PALETTE index.
+/// Index 0 = free/no-template; 1–7 = template colors.
+fn build_origins_map(world: &World) -> Box<[u8; 65536]> {
+    let mut map = Box::new([0u8; 65536]);
+    for p in world.programs.values() {
+        let cidx = match p.template_id {
+            None => 0u8,
+            Some(id) => ((id as usize % 7) + 1) as u8,
+        };
+        for i in 0..p.length {
+            map[p.start.wrapping_add(i) as usize] = cidx;
+        }
+    }
+    map
+}
+
 /// Map an energy deposit value to a yellow-scale color intensity.
-/// Returns None for zero (no deposit), or Some(Color) for non-zero.
 fn energy_color(deposit: u32) -> Option<Color> {
     if deposit == 0 {
         return None;
     }
-    // log2 scale: 1–15 → dim yellow, 16–255 → yellow, 256+ → bright white-yellow
     let level = (deposit as f64).log2() as u32;
     let color = match level {
         0..=3  => Color::Rgb(80, 60, 0),
@@ -134,9 +191,11 @@ fn energy_color(deposit: u32) -> Option<Color> {
     Some(color)
 }
 
-fn render_memory(world: &World, energy_overlay: bool, frame: &mut Frame, area: Rect) {
+fn render_memory(app: &App, frame: &mut Frame, area: Rect) {
+    let world = &app.world;
     let total_deposited: u64 = world.memory.energy_map.iter().map(|&v| v as u64).sum();
-    let overlay_label = if energy_overlay { "  [e:energy]" } else { "  [e:programs]" };
+    let mode = app.display_mode;
+    let overlay_label = format!("  [t:{}]", mode.label());
     let title = format!(
         " Memory  {} programs  {:.1}% used  deposited:{}{}",
         world.programs.len(),
@@ -154,48 +213,77 @@ fn render_memory(world: &World, energy_overlay: bool, frame: &mut Frame, area: R
 
     let w = inner.width as usize;
     let h = inner.height as usize;
-    let total_cells = w * h;
-    // how many bytes each terminal cell represents
-    let bytes_per_cell = (65536 + total_cells - 1) / total_cells;
 
-    let cmap = build_color_map(world);
+    // Reserve bottom lines for legend in origins mode
+    let legend_lines = if mode == DisplayMode::Origins {
+        let count = world.template_names.len().min(h);
+        count
+    } else {
+        0
+    };
+    let map_h = h.saturating_sub(legend_lines);
+
+    let total_cells = w * map_h;
+    let bytes_per_cell = if total_cells > 0 {
+        (65536 + total_cells - 1) / total_cells
+    } else {
+        1
+    };
+
+    let cmap = match mode {
+        DisplayMode::Programs => Some(build_color_map(world)),
+        DisplayMode::Origins  => Some(build_origins_map(world)),
+        DisplayMode::Energy   => None,
+    };
 
     let mut lines: Vec<Line> = Vec::with_capacity(h);
-    for row in 0..h {
+
+    for row in 0..map_h {
         let mut spans: Vec<Span> = Vec::with_capacity(w);
         for col in 0..w {
             let cell_idx = row * w + col;
             let addr_start = (cell_idx * bytes_per_cell).min(65535);
             let addr_end = ((cell_idx + 1) * bytes_per_cell).min(65536);
 
-            let (ch, color) = if energy_overlay {
-                // Max energy in this byte range
-                let max_e = (addr_start..addr_end)
-                    .map(|a| world.memory.energy_map[a])
-                    .max()
-                    .unwrap_or(0);
-                match energy_color(max_e) {
-                    Some(c) => ("\u{2588}", c),
-                    None    => ("\u{00B7}", Color::DarkGray),
+            let (ch, color) = match mode {
+                DisplayMode::Energy => {
+                    let max_e = (addr_start..addr_end)
+                        .map(|a| world.memory.energy_map[a])
+                        .max()
+                        .unwrap_or(0);
+                    match energy_color(max_e) {
+                        Some(c) => ("\u{2588}", c),
+                        None    => ("\u{00B7}", Color::DarkGray),
+                    }
                 }
-            } else {
-                // Majority vote on non-free color in this byte range
-                let mut counts = [0u16; 8];
-                for addr in addr_start..addr_end {
-                    counts[cmap[addr] as usize] += 1;
-                }
-                // Pick dominant occupied color (index 1–7), fall back to free (0)
-                let dominant = (1u8..8).max_by_key(|&i| counts[i as usize]).unwrap_or(0);
-                let occupied = counts[dominant as usize] > 0;
-                if occupied && dominant > 0 {
-                    ("\u{2588}", PALETTE[dominant as usize])
-                } else {
-                    ("\u{00B7}", Color::DarkGray)
+                DisplayMode::Programs | DisplayMode::Origins => {
+                    let palette = if mode == DisplayMode::Programs { &PALETTE } else { &ORIGIN_PALETTE };
+                    let map = cmap.as_ref().unwrap();
+                    let mut counts = [0u16; 8];
+                    for addr in addr_start..addr_end {
+                        counts[map[addr] as usize] += 1;
+                    }
+                    let dominant = (1u8..8).max_by_key(|&i| counts[i as usize]).unwrap_or(0);
+                    let occupied = counts[dominant as usize] > 0;
+                    if occupied && dominant > 0 {
+                        ("\u{2588}", palette[dominant as usize])
+                    } else {
+                        ("\u{00B7}", Color::DarkGray)
+                    }
                 }
             };
             spans.push(Span::styled(ch, Style::default().fg(color)));
         }
         lines.push(Line::from(spans));
+    }
+
+    // Append legend lines in origins mode
+    if mode == DisplayMode::Origins {
+        for (i, name) in world.template_names.iter().enumerate() {
+            let color = ORIGIN_PALETTE[(i % 7) + 1];
+            let label = format!(" \u{2588} {}", name);
+            lines.push(Line::from(Span::styled(label, Style::default().fg(color))));
+        }
     }
 
     let para = Paragraph::new(lines);
@@ -219,17 +307,31 @@ fn render_program_list(app: &mut App, frame: &mut Frame, area: Rect) {
                 pct
             );
             let color = program_color(id);
+
+            let tmpl_label = match p.template_id {
+                Some(tid) => app.world.template_names
+                    .get(tid as usize)
+                    .map(|n| {
+                        let s = n.as_str();
+                        if s.len() > 7 { s[..7].to_string() } else { s.to_string() }
+                    })
+                    .unwrap_or_else(|| format!("#{tid}")),
+                None => "\u{00B7}".to_string(),
+            };
+            let tmpl_color = origin_color(p.template_id);
+
             Row::new(vec![
                 Cell::from(id.to_string()).style(Style::default().fg(color)),
                 Cell::from(p.start.to_string()),
                 Cell::from(p.length.to_string()),
                 Cell::from(p.age.to_string()),
                 Cell::from(bar).style(Style::default().fg(color)),
+                Cell::from(tmpl_label).style(Style::default().fg(tmpl_color)),
             ])
         })
         .collect();
 
-    let header = Row::new(["ID", "Start", "Len", "Age", "Energy"])
+    let header = Row::new(["ID", "Start", "Len", "Age", "Energy", "Tmpl"])
         .style(Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED));
 
     let widths = [
@@ -238,6 +340,7 @@ fn render_program_list(app: &mut App, frame: &mut Frame, area: Rect) {
         Constraint::Length(4),
         Constraint::Length(8),
         Constraint::Min(14),
+        Constraint::Length(8),
     ];
 
     let table = Table::new(rows, widths)
@@ -260,6 +363,13 @@ fn render_inspector(world: &World, selected_id: Option<u32>, frame: &mut Frame, 
                 .parent_id
                 .map(|id| id.to_string())
                 .unwrap_or_else(|| "\u{2014}".to_string());
+            let tmpl = match p.template_id {
+                Some(tid) => world.template_names
+                    .get(tid as usize)
+                    .map(|n| n.clone())
+                    .unwrap_or_else(|| format!("#{tid}")),
+                None => "\u{2014}".to_string(),
+            };
             vec![
                 Line::from(format!(
                     " ID:{id}  IP:{ip}  A:{a}  B:{b}  RH:{rh}  WH:{wh}  \
@@ -275,7 +385,7 @@ fn render_inspector(world: &World, selected_id: Option<u32>, frame: &mut Frame, 
                     stack = stack.join(","),
                 )),
                 Line::from(format!(
-                    " Parent:{parent}  Lineage:{}",
+                    " Parent:{parent}  Lineage:{}  Tmpl:{tmpl}",
                     &p.lineage_id.to_string()[..8],
                 )),
             ]
@@ -305,7 +415,7 @@ fn render_statusbar(app: &App, frame: &mut Frame, area: Rect) {
         )
     };
     let info = Span::raw(format!(
-        "  tick:{:>10}  speed:{:>7}x/frame  [p]ause  [s]tep  [+/-]speed  [\u{2191}\u{2193}]select  [e]nergy  [q]uit",
+        "  tick:{:>10}  speed:{:>7}x/frame  [p]ause  [s]tep  [+/-]speed  [\u{2191}\u{2193}]select  [t]display  [q]uit",
         app.world.tick, app.steps_per_frame,
     ));
     let line = Line::from(vec![status, info]);
@@ -315,7 +425,6 @@ fn render_statusbar(app: &App, frame: &mut Frame, area: Rect) {
 fn render(app: &mut App, frame: &mut Frame) {
     let area = frame.area();
 
-    // Outer vertical split: status | main | inspector
     let chunks = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(8),
@@ -326,7 +435,6 @@ fn render(app: &mut App, frame: &mut Frame) {
     let main_area = chunks[1];
     let inspector_area = chunks[2];
 
-    // Main horizontal split: memory | program list
     let main_chunks = Layout::horizontal([
         Constraint::Percentage(62),
         Constraint::Percentage(38),
@@ -336,7 +444,7 @@ fn render(app: &mut App, frame: &mut Frame) {
     let list_area = main_chunks[1];
 
     render_statusbar(app, frame, status_area);
-    render_memory(&app.world, app.energy_overlay, frame, memory_area);
+    render_memory(app, frame, memory_area);
     render_program_list(app, frame, list_area);
     render_inspector(&app.world, app.selected_id, frame, inspector_area);
 }
@@ -346,10 +454,8 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) -> i
     let mut last_frame = Instant::now();
 
     loop {
-        // Draw
         terminal.draw(|f| render(&mut app, f))?;
 
-        // Poll for key events with a short timeout
         let wait = frame_interval
             .checked_sub(last_frame.elapsed())
             .unwrap_or(Duration::ZERO);
@@ -366,12 +472,20 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) -> i
                     }
                     KeyCode::Char('p') | KeyCode::Char(' ') => app.paused = !app.paused,
                     KeyCode::Char('s') => {
-                        // Single step even when paused
                         app.world.tick();
                     }
                     KeyCode::Char('+') | KeyCode::Char('=') => app.speed_up(),
                     KeyCode::Char('-') => app.speed_down(),
-                    KeyCode::Char('e') => app.energy_overlay = !app.energy_overlay,
+                    KeyCode::Char('t') => {
+                        app.display_mode = app.display_mode.next();
+                    }
+                    // Keep 'e' as shortcut for toggling energy overlay
+                    KeyCode::Char('e') => {
+                        app.display_mode = match app.display_mode {
+                            DisplayMode::Energy => DisplayMode::Programs,
+                            _ => DisplayMode::Energy,
+                        };
+                    }
                     KeyCode::Down => app.select_next(),
                     KeyCode::Up => app.select_prev(),
                     _ => {}
@@ -397,7 +511,6 @@ fn main() -> io::Result<()> {
 
     let result = run(&mut terminal, App::new(config));
 
-    // Always restore terminal, even on error
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;

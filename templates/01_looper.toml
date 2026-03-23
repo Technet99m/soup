@@ -1,0 +1,3 @@
+name = "looper"
+description = "Baseline self-replicator. Uses LOOP_OPEN/LOOP_CLOSE for copy. Hardcoded size. Lots of NOP padding — easy evolution target."
+bytes = [5, 31, 12, 32, 40, 25, 11, 5, 5, 5, 12, 32, 50, 23, 10, 24, 12, 32, 60, 70, 26, 11, 12, 100, 17, 30, 80, 90, 110, 12, 32, 20]

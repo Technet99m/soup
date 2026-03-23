@@ -18,6 +18,10 @@ pub struct Config {
     pub energy_decay_interval: u64,
     #[serde(skip)]
     pub log_path: PathBuf,
+    /// Directory containing `*.toml` template files. Default: "templates".
+    /// Falls back to hardcoded SEED if missing or empty.
+    #[serde(skip)]
+    pub templates_dir: PathBuf,
 }
 
 impl Default for Config {
@@ -34,6 +38,7 @@ impl Default for Config {
             energy_decay_rate: 1,
             energy_decay_interval: 100,
             log_path: PathBuf::from("soup.log"),
+            templates_dir: PathBuf::from("templates"),
         }
     }
 }
@@ -83,6 +88,9 @@ impl Config {
         parse_env!(energy_decay_interval, "ENERGY_DECAY_INTERVAL");
         if let Ok(v) = std::env::var("LOG_PATH") {
             c.log_path = PathBuf::from(v);
+        }
+        if let Ok(v) = std::env::var("SOUP_TEMPLATES_DIR") {
+            c.templates_dir = PathBuf::from(v);
         }
         c
     }
