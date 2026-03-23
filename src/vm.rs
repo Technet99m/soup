@@ -41,13 +41,15 @@ pub fn step(
     rng: &mut impl Rng,
     events: &mut Vec<Event>,
     tick: u64,
+    ambient: &mut u64,
 ) -> StepResult {
     // Energy check: if already at zero, program is dead.
     if p.energy == 0 {
         return StepResult::OutOfEnergy;
     }
-    // Charge base cost of 1 for any instruction.
+    // Charge base cost of 1 for any instruction; burned energy returns to ambient.
     p.energy -= 1;
+    *ambient += 1;
 
     let opcode = Opcode::from(mem.read(p.ip));
     let ip = p.ip;
@@ -202,6 +204,7 @@ pub fn step(
         Opcode::Alloc => {
             if p.energy >= cfg.alloc_cost {
                 p.energy -= cfg.alloc_cost;
+                *ambient += cfg.alloc_cost as u64;
                 if p.reg_a > 0 {
                     if let Some(addr) = fl.alloc(p.reg_a) {
                         p.reg_b = addr;
@@ -221,13 +224,17 @@ pub fn step(
                 && !fl.is_free(child_start, child_len)
             {
                 p.energy -= cfg.commit_cost;
+                *ambient += cfg.commit_cost as u64;
+                // Transfer child_energy from parent; parent is never left below zero.
+                let transfer = cfg.child_energy.min(p.energy);
+                p.energy -= transfer;
                 let child_id = *next_id;
                 *next_id += 1;
                 let child = Program::new(
                     child_id,
                     child_start,
                     child_len,
-                    cfg.initial_energy,
+                    transfer,
                     Some(p.id),
                     Some(p.lineage_id),
                     p.template_id,
@@ -247,7 +254,8 @@ pub fn step(
                 && !fl.is_free(child_start, child_len)
             {
                 p.energy -= cfg.commit_cost;
-                // Give child half of remaining energy
+                *ambient += cfg.commit_cost as u64;
+                // Give child half of remaining energy (transfer, not a burn)
                 let child_energy = p.energy / 2;
                 p.energy -= child_energy;
                 let child_id = *next_id;
@@ -367,8 +375,9 @@ mod tests {
         let mut next_id: ProgramId = 100;
         let mut rng = StdRng::seed_from_u64(0);
         let mut events = Vec::new();
+        let mut ambient = 0u64;
         for _ in 0..1_000_000 {
-            last = step(&mut p, &mut mem, &mut fl, &cfg, &mut next_id, &mut rng, &mut events, 0);
+            last = step(&mut p, &mut mem, &mut fl, &cfg, &mut next_id, &mut rng, &mut events, 0, &mut ambient);
             match last {
                 StepResult::Continue => {}
                 _ => break,
@@ -434,7 +443,8 @@ mod tests {
         let mut next_id: ProgramId = 100;
         let mut rng = StdRng::seed_from_u64(0);
         let mut events = Vec::new();
-        let _ = step(&mut p2, &mut mem2, &mut fl2, &cfg, &mut next_id, &mut rng, &mut events, 0);
+        let mut ambient = 0u64;
+        let _ = step(&mut p2, &mut mem2, &mut fl2, &cfg, &mut next_id, &mut rng, &mut events, 0, &mut ambient);
         assert_eq!(p2.reg_a, 0);
     }
 
@@ -490,9 +500,10 @@ mod tests {
         let mut next_id: ProgramId = 100;
         let mut rng = StdRng::seed_from_u64(0);
         let mut events = Vec::new();
+        let mut ambient = 0u64;
         let mut result = StepResult::Continue;
         for _ in 0..10_000 {
-            result = step(&mut p, &mut mem, &mut fl, &cfg, &mut next_id, &mut rng, &mut events, 0);
+            result = step(&mut p, &mut mem, &mut fl, &cfg, &mut next_id, &mut rng, &mut events, 0, &mut ambient);
             match result {
                 StepResult::Continue => {}
                 _ => break,
@@ -528,8 +539,9 @@ mod tests {
         let mut next_id: ProgramId = 100;
         let mut rng = StdRng::seed_from_u64(0);
         let mut events = Vec::new();
+        let mut ambient = 0u64;
         for _ in 0..100 {
-            match step(&mut p, &mut mem, &mut fl, &cfg, &mut next_id, &mut rng, &mut events, 0) {
+            match step(&mut p, &mut mem, &mut fl, &cfg, &mut next_id, &mut rng, &mut events, 0, &mut ambient) {
                 StepResult::Continue => {}
                 _ => break,
             }
@@ -554,8 +566,9 @@ mod tests {
         let mut next_id: ProgramId = 100;
         let mut rng = StdRng::seed_from_u64(0);
         let mut events = Vec::new();
+        let mut ambient = 0u64;
         for _ in 0..100 {
-            match step(&mut p, &mut mem, &mut fl, &cfg, &mut next_id, &mut rng, &mut events, 0) {
+            match step(&mut p, &mut mem, &mut fl, &cfg, &mut next_id, &mut rng, &mut events, 0, &mut ambient) {
                 StepResult::Continue => {}
                 _ => break,
             }
@@ -575,8 +588,9 @@ mod tests {
         let mut next_id: ProgramId = 100;
         let mut rng = StdRng::seed_from_u64(0);
         let mut events = Vec::new();
+        let mut ambient = 0u64;
         for _ in 0..100 {
-            match step(&mut p, &mut mem, &mut fl, &cfg, &mut next_id, &mut rng, &mut events, 0) {
+            match step(&mut p, &mut mem, &mut fl, &cfg, &mut next_id, &mut rng, &mut events, 0, &mut ambient) {
                 StepResult::Continue => {}
                 _ => break,
             }
@@ -610,8 +624,9 @@ mod tests {
         let mut next_id: ProgramId = 100;
         let mut rng = StdRng::seed_from_u64(0);
         let mut events = Vec::new();
+        let mut ambient = 0u64;
         loop {
-            match step(&mut p, &mut mem, &mut fl, &cfg, &mut next_id, &mut rng, &mut events, 0) {
+            match step(&mut p, &mut mem, &mut fl, &cfg, &mut next_id, &mut rng, &mut events, 0, &mut ambient) {
                 StepResult::Continue => {}
                 _ => break,
             }
@@ -638,10 +653,11 @@ mod tests {
         let mut next_id: ProgramId = 100;
         let mut rng = StdRng::seed_from_u64(0);
         let mut events = Vec::new();
+        let mut ambient = 0u64;
 
         let mut result = StepResult::Continue;
         for _ in 0..1_000 {
-            result = step(&mut p, &mut mem, &mut fl, &cfg, &mut next_id, &mut rng, &mut events, 0);
+            result = step(&mut p, &mut mem, &mut fl, &cfg, &mut next_id, &mut rng, &mut events, 0, &mut ambient);
             if !matches!(result, StepResult::Continue) {
                 break;
             }

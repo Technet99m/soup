@@ -12,6 +12,10 @@ pub struct StatsSnapshot {
     pub instruction_histogram: Box<[u64; 256]>,
     pub oldest_age: u64,
     pub total_free_blocks: usize,
+    /// Energy currently held in the ambient pool.
+    pub ambient_pool: u64,
+    /// Total energy currently deposited across all energy map cells.
+    pub energy_map_total: u64,
 }
 
 impl StatsSnapshot {
@@ -45,6 +49,8 @@ impl StatsSnapshot {
             }
         }
 
+        let energy_map_total: u64 = world.memory.energy_map.iter().map(|&v| v as u64).sum();
+
         StatsSnapshot {
             tick: world.tick,
             live_programs,
@@ -53,19 +59,23 @@ impl StatsSnapshot {
             instruction_histogram: histogram,
             oldest_age,
             total_free_blocks: world.free_list.num_blocks(),
+            ambient_pool: world.ambient_pool,
+            energy_map_total,
         }
     }
 
     /// Print a human-readable summary to stdout.
     pub fn print(&self) {
         println!(
-            "tick={:>12}  live={:>5}  mem={:>5.1}%  lineages={:>4}  oldest={:>8}  free_blocks={:>4}",
+            "tick={:>12}  live={:>5}  mem={:>5.1}%  lineages={:>4}  oldest={:>8}  free_blocks={:>4}  ambient={:>10}  emap={:>10}",
             self.tick,
             self.live_programs,
             self.memory_utilization * 100.0,
             self.unique_lineages,
             self.oldest_age,
             self.total_free_blocks,
+            self.ambient_pool,
+            self.energy_map_total,
         );
     }
 }

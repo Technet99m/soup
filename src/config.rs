@@ -16,6 +16,14 @@ pub struct Config {
     pub energy_decay_rate: u32,
     /// How many ticks between decay sweeps of the energy map. Default: 100.
     pub energy_decay_interval: u64,
+    /// Total energy in the system (conserved). Default: 1_000_000.
+    pub total_energy: u64,
+    /// Energy transferred from parent to child on COMMIT. Default: 500.
+    pub child_energy: u32,
+    /// How many ticks between ambient drip events. Default: 10.
+    pub ambient_drip_interval: u64,
+    /// Energy deposited to a random cell per drip event. Default: 500.
+    pub ambient_drip_amount: u32,
     #[serde(skip)]
     pub log_path: PathBuf,
     /// Directory containing `*.toml` template files. Default: "templates".
@@ -28,7 +36,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             memory_size: 65536,
-            initial_energy: 1_000,
+            initial_energy: 5_000,
             mutation_rate: 0.005,
             alloc_cost: 10,
             commit_cost: 20,
@@ -37,6 +45,10 @@ impl Default for Config {
             rng_seed: 42,
             energy_decay_rate: 1,
             energy_decay_interval: 100,
+            total_energy: 1_000_000,
+            child_energy: 500,
+            ambient_drip_interval: 10,
+            ambient_drip_amount: 500,
             log_path: PathBuf::from("soup.log"),
             templates_dir: PathBuf::from("templates"),
         }
@@ -64,6 +76,10 @@ impl Config {
                 c.rng_seed = file_cfg.rng_seed;
                 c.energy_decay_rate = file_cfg.energy_decay_rate;
                 c.energy_decay_interval = file_cfg.energy_decay_interval;
+                c.total_energy = file_cfg.total_energy;
+                c.child_energy = file_cfg.child_energy;
+                c.ambient_drip_interval = file_cfg.ambient_drip_interval;
+                c.ambient_drip_amount = file_cfg.ambient_drip_amount;
             }
         }
 
@@ -86,6 +102,10 @@ impl Config {
         parse_env!(rng_seed,              "RNG_SEED");
         parse_env!(energy_decay_rate,     "ENERGY_DECAY_RATE");
         parse_env!(energy_decay_interval, "ENERGY_DECAY_INTERVAL");
+        parse_env!(total_energy,          "TOTAL_ENERGY");
+        parse_env!(child_energy,          "CHILD_ENERGY");
+        parse_env!(ambient_drip_interval, "AMBIENT_DRIP_INTERVAL");
+        parse_env!(ambient_drip_amount,   "AMBIENT_DRIP_AMOUNT");
         if let Ok(v) = std::env::var("LOG_PATH") {
             c.log_path = PathBuf::from(v);
         }

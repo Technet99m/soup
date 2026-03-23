@@ -23,6 +23,10 @@ pub struct World {
     rng: StdRng,
     /// Names of the startup templates, indexed by template_id.
     pub template_names: Vec<String>,
+    /// The ambient energy pool — conserved total minus program energies and energy map.
+    /// Burns from instruction execution return here; drip deposits from here to the
+    /// energy map; deaths return remaining program energy here.
+    pub ambient_pool: u64,
 }
 
 /// Build a FreeList covering all memory NOT occupied by the given placements.
@@ -97,6 +101,9 @@ impl World {
 
         let template_names = templates.into_iter().map(|t| t.name).collect();
 
+        let seed_energy: u64 = programs.values().map(|p| p.energy as u64).sum();
+        let ambient_pool = config.total_energy.saturating_sub(seed_energy);
+
         World {
             memory,
             free_list,
@@ -107,6 +114,7 @@ impl World {
             tick: 0,
             next_id: num as ProgramId,
             template_names,
+            ambient_pool,
         }
     }
 
@@ -116,12 +124,26 @@ impl World {
         self.tick += 1;
         let mut events = Vec::new();
 
-        // Periodic energy map decay: subtract energy_decay_rate from every deposit.
-        let interval = self.config.energy_decay_interval;
-        if interval > 0 && self.tick % interval == 0 {
+        // Periodic energy map decay: return decayed energy to ambient pool.
+        let decay_interval = self.config.energy_decay_interval;
+        if decay_interval > 0 && self.tick % decay_interval == 0 {
             let rate = self.config.energy_decay_rate;
             for cell in self.memory.energy_map.iter_mut() {
-                *cell = cell.saturating_sub(rate);
+                let decay = (*cell).min(rate);
+                *cell -= decay;
+                self.ambient_pool += decay as u64;
+            }
+        }
+
+        // Periodic ambient drip: deposit a chunk from ambient pool to a random cell.
+        let drip_interval = self.config.ambient_drip_interval;
+        if drip_interval > 0 && self.tick % drip_interval == 0 {
+            let amount = (self.config.ambient_drip_amount as u64).min(self.ambient_pool) as u32;
+            if amount > 0 {
+                use rand::Rng;
+                let addr = self.rng.gen::<u16>();
+                self.memory.give_energy(addr, amount);
+                self.ambient_pool -= amount as u64;
             }
         }
 
@@ -136,7 +158,7 @@ impl World {
 
         let result = {
             let p = self.programs.get_mut(&id).unwrap();
-            vm::step(p, &mut self.memory, &mut self.free_list, &self.config, &mut self.next_id, &mut self.rng, &mut events, self.tick)
+            vm::step(p, &mut self.memory, &mut self.free_list, &self.config, &mut self.next_id, &mut self.rng, &mut events, self.tick, &mut self.ambient_pool)
         };
 
         match result {
@@ -144,8 +166,9 @@ impl World {
                 self.queue.push_back(id);
             }
             StepResult::Halted => {
-                // Program executed HALT — kill it and free memory.
+                // Program executed HALT — return remaining energy to ambient, free memory.
                 if let Some(p) = self.programs.remove(&id) {
+                    self.ambient_pool += p.energy as u64;
                     self.free_list.free(p.start, p.length);
                     events.push(Event::Died {
                         tick: self.tick,
@@ -155,7 +178,9 @@ impl World {
                 }
             }
             StepResult::OutOfEnergy => {
+                // Energy is 0 (all burned to ambient via step()); nothing to return.
                 if let Some(p) = self.programs.remove(&id) {
+                    self.ambient_pool += p.energy as u64; // always 0, but explicit
                     self.free_list.free(p.start, p.length);
                     events.push(Event::Died {
                         tick: self.tick,

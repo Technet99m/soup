@@ -1,10 +1,14 @@
 name = "splitter"
-description = "Uses SPLIT instead of COMMIT — parent and child share energy equally on each reproduction. Shorter program, faster generational turnover."
-# 18 bytes:
-# [0]  SEEK_SELF_START   [1]  TAKE_ENERGY
-# [2]  LOAD_IMM [3] 18   [4]  ALLOC  [5]  SET_WRITE_HEAD
-# [6]  SEEK_SELF_START   [7]  LOAD_IMM [8] 18
-# [9]  LOOP_OPEN  [10] COPY  [11] LOOP_CLOSE
-# [12] LOAD_IMM [13] 18  [14] SPLIT
-# [15] LOAD_IMM [16] 18  [17] JMP_BWD → 18-18=0 ✓
-bytes = [5, 31, 12, 18, 25, 11, 5, 12, 18, 23, 10, 24, 12, 18, 27, 12, 18, 20]
+description = "Forward adaptive scanner with SPLIT: scans own-length cells forward, then splits energy equally with child. Uses MEASURE_SELF throughout — fully adaptive to size mutations. No GIVE_ENERGY needed since SPLIT transfers energy directly."
+# 20 bytes:
+# [0]  SEEK_SELF_START   [1]  TAKE_ENERGY         (parent gift)
+# [2]  MEASURE_SELF → A = own_len                 (scan count)
+# [3]  LOOP_OPEN  [4] MOV_FWD  [5] TAKE_ENERGY  [6] LOOP_CLOSE
+#   → sweeps own_len cells forward from self.start
+# [7]  SEEK_SELF_START   (reset RH)
+# [8]  MEASURE_SELF → A = own_len  [9]  ALLOC  [10] SET_WRITE_HEAD
+# [11] SEEK_SELF_START
+# [12] MEASURE_SELF → A = own_len  [13] LOOP_OPEN  [14] COPY  [15] LOOP_CLOSE
+# [16] MEASURE_SELF → A = own_len  [17] SPLIT      (parent keeps half, child gets half)
+# [18] MEASURE_SELF → A = own_len  [19] JMP_BWD  → (19+1)-20=0 ✓
+bytes = [5, 31, 33, 23, 1, 31, 24, 5, 33, 25, 11, 5, 33, 23, 10, 24, 33, 27, 33, 20]
