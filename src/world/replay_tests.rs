@@ -20,6 +20,7 @@ fn digest_is_canonical_under_all_hashmap_insertion_orders() {
         a.births_by_parent_heritable_identity.insert(key, i);
         a.last_birth_by_heritable_identity.insert(key, i);
         a.steps_by_heritable_identity.insert(key, i);
+        a.steps_by_program_id.insert(i as ProgramId, i);
         a.interactions
             .insert((key, HeritableIdentity::new(i + 1, 0)), i);
     }
@@ -38,6 +39,7 @@ fn digest_is_canonical_under_all_hashmap_insertion_orders() {
     reverse_map!(last_birth_by_heritable_identity);
     reverse_map!(interactions);
     reverse_map!(steps_by_heritable_identity);
+    reverse_map!(steps_by_program_id);
     assert_eq!(a.state_digest(), b.state_digest());
     assert_eq!(
         StatsSnapshot::compute(&a).format_headless(),
@@ -253,6 +255,11 @@ fn namespaces_cover_effective_config_and_ignore_observer_paths() {
     let same = World::new(cfg.clone());
     assert_eq!(original.run_namespace(), same.run_namespace());
     assert_eq!(original.state_digest(), same.state_digest());
+    cfg.counterfactual_replicates += 1;
+    let observer_changed = World::new(cfg.clone());
+    assert_eq!(original.run_namespace(), observer_changed.run_namespace());
+    assert_ne!(original.state_digest(), observer_changed.state_digest());
+    cfg.counterfactual_replicates = original.config.counterfactual_replicates;
     cfg.foreign_exec_tracking = false;
     cfg.foreign_write_tracking = false;
     assert_eq!(original.run_namespace(), World::new(cfg).run_namespace());
@@ -675,6 +682,19 @@ fn ecotype_hash_collections_have_canonical_insertion_order() {
     announced.sort();
     b.announced_ecotypes.extend(announced.into_iter().rev());
     assert_eq!(a.state_digest(), b.state_digest());
+}
+
+#[test]
+fn counterfactual_step_observer_cannot_change_birth_identity() {
+    let mut baseline = world();
+    let mut observed = baseline.clone();
+    observed.steps_by_program_id.insert(99_999, u64::MAX);
+
+    assert_ne!(baseline.state_digest(), observed.state_digest());
+    assert_eq!(
+        next_birth_lineage(&mut baseline),
+        next_birth_lineage(&mut observed)
+    );
 }
 
 #[test]

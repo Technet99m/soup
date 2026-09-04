@@ -46,22 +46,26 @@ Controls:
 - `+` / `-`: change speed by 10×
 - `v`: cycle genome, ancestry, and resource views
 - `up` / `down`: inspect another organism
-- `y`: run a 100,000-tick partner-removal experiment on cloned worlds
+- `y`: run replicated 100,000-tick partner-removal experiments on cloned worlds
 - `x`: cancel the active partner-removal experiment
 - `r`: start again from the single ancestor
 - `q`: exit
 
 The simulation records the donor behind each consumed deposit. Its behavior trace separately counts local foreign-organism and recognition-tag searches; the observer labels these as local foreign, local tag, or combined organism seekers. Both searches use the configured inclusive circular `interaction_radius`, check both directions, and cannot target remote organisms in one instruction.
 
-Counterfactual tests first choose an active pair of heritable identities with direct cross-organism resource-transfer evidence, falling back to abundant complementary metabolisms when no such exchange exists. The result reports how much each heritable identity's reproduction rate falls without the other. `Mutualism` requires both losses to reach 20% with at least two intact-world births each. That is evidence of ecological dependence under the current conditions, not proof that either program is semantically novel.
+Counterfactual tests first choose an active pair of heritable identities with direct cross-organism resource-transfer evidence, falling back to abundant complementary metabolisms when no such exchange exists. Each snapshot-time identity defines the roots of a focal clade; all parent-to-child descendants stay in that clade through later genome, recognition-tag, and behavior changes. This ancestry definition is independent of behavioral ecotypes.
+
+Each deterministic replicate derives a domain-separated endogenous RNG seed from the exact birth-state digest, focal identities, and replicate index, then gives its intact, sham-intact, and two removal branches that same seed. All branches replay the same organism-independent resource schedule. Reproduction is normalized by instructions executed, and the report identifies the source state digest and gives paired mean losses with 95% Student-t intervals, effective sample and birth counts, replay-control failures, and direct cross-clade transfers separately from indirect ecological effects. A verdict requires at least two valid replicates, two intact births per clade per replicate on aggregate, passing controls, and intervals wholly beyond the predeclared 20% effect margin (or wholly within it for `NoEffect`); unavailable, low-evidence, and noisy results remain `Inconclusive`. These observer-only trackers never affect scheduling, mutation, resources, fitness, or selection.
 
 For a reproducible headless run:
 
 ```sh
 LOG_PATH=/tmp/soup.log cargo run --release --bin soup -- \
-  --ticks 1000000 --test-symbiosis --symbiosis-horizon 100000
+  --ticks 1000000 --test-symbiosis --symbiosis-horizon 100000 \
+  --symbiosis-replicates 8
 ```
 
-Configuration lives in `soup.toml`. Resource sources have independently configurable chemistry, position, cadence, amount, width, and velocity. Their shared spatial origin is derived from `rng_seed`, and the ancestor is placed there so it can reach both chemistries without any source targeting live organisms. The other templates are retained as optional inoculations, but only `templates/01_ancestor.toml` has `seed = true` by default. Every default descendant therefore comes from the same minimal ancestor.
+Configuration lives in `soup.toml`; `counterfactual_replicates` (or `COUNTERFACTUAL_REPLICATES`) sets the default replicate count. Resource sources have independently configurable chemistry, position, cadence, amount, width, and velocity. Their shared spatial origin is derived from `rng_seed`, and the ancestor is placed there so it can reach both chemistries without any source targeting live organisms. The other templates are retained as optional inoculations, but only `templates/01_ancestor.toml` has `seed = true` by default. Every default descendant therefore comes from the same minimal ancestor.
 
 Resource movement and metabolism are bounded per scheduler turn. `max_resource_flux_per_instruction` caps every A/B `TAKE` and `EXCRETE`; `max_metabolism_per_instruction` caps every A/B `CONVERT` and the number of A+B pairs processed by `COMBINE_AB`. Register B remains the requested quantity, except B=0 requests the configured metabolic maximum rather than an unlimited conversion. The 256-unit defaults exceed each default source emission (at most 200 units), preserve the ancestor's deterministic long-run viability, and still prevent a single instruction from moving an accumulated `u32` store. These caps are physical rules only: they do not inspect identity, behavior, lineage, reproduction, or fitness.
+

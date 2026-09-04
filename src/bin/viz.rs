@@ -23,7 +23,7 @@ use soup::{
     events::Event,
     identity::HeritableIdentity,
     stats::tag_stats,
-    world::World,
+    world::{ConfidenceInterval, World},
 };
 
 const GENOME_COLORS: [Color; 12] = [
@@ -489,16 +489,25 @@ impl App {
             } => self.push_activity(
                 source_tick,
                 format!(
-                    "counterfactual {:?} from source tick {source_tick}: {:06x}/{:02x} loses {:.0}%, {:06x}/{:02x} loses {:.0}% (births {} / {})",
+                    "counterfactual {:?} from source tick {source_tick} state={}: {:06x}/{:02x} loss {:.0}% (CI {}, n={}), {:06x}/{:02x} loss {:.0}% (CI {}, n={}) (reps={}, births={}/{}, direct B→A={}, A→B={}, controls={})",
                     report.verdict,
+                    short_digest(report.source_state_digest.as_deref()),
                     report.heritable_identity_a.genome & 0xffffff,
                     report.heritable_identity_a.tag,
                     report.dependence_a * 100.0,
+                    counterfactual_interval_text(report.dependence_a_interval),
+                    report.dependence_a_samples,
                     report.heritable_identity_b.genome & 0xffffff,
                     report.heritable_identity_b.tag,
                     report.dependence_b * 100.0,
+                    counterfactual_interval_text(report.dependence_b_interval),
+                    report.dependence_b_samples,
+                    report.replicates,
                     report.baseline_births_a,
                     report.baseline_births_b,
+                    report.direct_transfer.a_received_from_b,
+                    report.direct_transfer.b_received_from_a,
+                    report.control_failures,
                 ),
                 ActivityKind::Relationship,
             ),
@@ -1198,12 +1207,31 @@ fn main() -> io::Result<()> {
     Ok(())
 }
 
+fn counterfactual_interval_text(interval: Option<ConfidenceInterval>) -> String {
+    interval.map_or_else(
+        || "unavailable".into(),
+        |interval| {
+            format!(
+                "{:.0}..{:.0}%",
+                interval.lower * 100.0,
+                interval.upper * 100.0
+            )
+        },
+    )
+}
+
+fn short_digest(digest: Option<&str>) -> &str {
+    digest
+        .map(|digest| &digest[..digest.len().min(12)])
+        .unwrap_or("unavailable")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use soup::{
         counterfactual::{TrialEvent, TrialFailureReason},
-        world::{RelationshipVerdict, SymbiosisReport},
+        world::{ConfidenceInterval, DirectTransferEvidence, RelationshipVerdict, SymbiosisReport},
     };
     use std::path::PathBuf;
 
@@ -1392,6 +1420,7 @@ mod tests {
         app.handle_trial_event(TrialEvent::Completed {
             source_tick: 123,
             report: SymbiosisReport {
+                source_state_digest: Some("abcdef0123456789".into()),
                 heritable_identity_a: HeritableIdentity::new(0xaaa, 1),
                 heritable_identity_b: HeritableIdentity::new(0xbbb, 2),
                 horizon: 10,
@@ -1399,6 +1428,19 @@ mod tests {
                 baseline_births_b: 4,
                 dependence_a: 0.25,
                 dependence_b: 0.5,
+                dependence_a_interval: Some(ConfidenceInterval {
+                    lower: 0.2,
+                    upper: 0.3,
+                }),
+                dependence_b_interval: Some(ConfidenceInterval {
+                    lower: 0.4,
+                    upper: 0.6,
+                }),
+                dependence_a_samples: 8,
+                dependence_b_samples: 8,
+                replicates: 8,
+                direct_transfer: DirectTransferEvidence::default(),
+                control_failures: 0,
                 verdict: RelationshipVerdict::Mutualism,
             },
         });

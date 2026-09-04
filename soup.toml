@@ -42,6 +42,7 @@ ticks_per_stat_log    = 10_000
 ecotype_min_persistence_ticks = 10_000
 ecotype_min_reproductive_output = 2
 ecotype_min_descendant_generations = 2 # matching grandchild required
+counterfactual_replicates = 8
 rng_seed              = 14201
 memory_size           = 65536
 
