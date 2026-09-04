@@ -1,12 +1,12 @@
 name = "carnivore_drain"
-description = "Injection parasite: finds a foreign program, overwrites its body with a GIVE_ENERGY_IMM payload that deposits energy to drop-zone address 0x0000, then harvests that drop zone. Energy flows victim → drop zone → self each time the victim executes the injected instruction."
+description = "Injection parasite: injects EXCRETE_A_IMM so a victim deposits stored A at address 0x0000, then takes and converts that A. It cannot manufacture A from victim energy."
 seed = false # hostile inoculation; enable explicitly for a predator experiment
-# 27 bytes:
-# Phase 1: inject [GIVE_ENERGY_IMM, 0x00, 0x00] at victim's address
+# 28 bytes:
+# Phase 1: inject [EXCRETE_A_IMM, 0x00, 0x00] at victim's address
 # [0]  SEEK_FOREIGN_START (35) — reg_b = foreign addr
 # [1]  SET_WRITE_HEAD     (11) — WH = foreign addr
 # [2]  LOAD_IMM           (12)
-# [3]  36                      — reg_a = GIVE_ENERGY_IMM opcode
+# [3]  36                      — reg_a = EXCRETE_A_IMM opcode
 # [4]  WRITE              (9)  — mem[WH] = 36
 # [5]  SWAP               (17) — reg_a = foreign_addr, reg_b = 36
 # [6]  INC                (15) — reg_a = foreign_addr + 1
@@ -28,10 +28,11 @@ seed = false # hostile inoculation; enable explicitly for a predator experiment
 # [20] 0                       — reg_a = 0
 # [21] SWAP               (17) — reg_b = 0
 # [22] SET_READ_HEAD      (34) — RH = 0 (drop zone)
-# [23] TAKE_ENERGY        (31) — drain energy_map[0] → self
+# [23] TAKE_RESOURCE_A    (31) — move resource A into the internal store
+# [24] CONVERT_A          (44) — convert the stolen A to energy
 #
 # Loop back to top
-# [24] LOAD_IMM           (12)
-# [25] 27                      — reg_a = 27
-# [26] JMP_BWD            (20) — ip_next = (26+1) - 27 = 0 ✓
-bytes = [35, 11, 12, 36, 9, 17, 15, 17, 11, 12, 0, 9, 17, 15, 17, 11, 12, 0, 9, 12, 0, 17, 34, 31, 12, 27, 20]
+# [25] LOAD_IMM           (12)
+# [26] 28                      — reg_a = 28
+# [27] JMP_BWD            (20) — ip_next = (27+1) - 28 = 0 ✓
+bytes = [35, 11, 12, 36, 9, 17, 15, 17, 11, 12, 0, 9, 17, 15, 17, 11, 12, 0, 9, 12, 0, 17, 34, 31, 44, 12, 28, 20]

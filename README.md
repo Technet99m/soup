@@ -1,13 +1,13 @@
 # Primordial Soup
 
-A single 16-byte ancestor enters a circular 64 KiB memory and leaves descendants. Nothing is scored and no target program is supplied. Programs survive by executing bytecode, finding finite resources, copying themselves, and paying for every instruction.
+A single 18-byte ancestor enters a circular 64 KiB memory and leaves descendants. Nothing is scored and no target program is supplied. Programs survive by executing bytecode, finding finite resources, converting distinct A and B metabolites, copying themselves, and paying for every instruction.
 
 The redesign gives evolution room to change more than byte values:
 
 - insertions, deletions, and gene-like span duplications change genome length;
 - the ancestor measures its current length, so resized descendants can still reproduce;
 - offspring usually occupy memory beside their parent, allowing persistent local ecologies;
-- A and B resources come from organism-independent fixed or moving sources, flow in opposite currents, require different instructions, and can only be found locally;
+- A and B resources come from organism-independent fixed or moving sources, flow in opposite currents, occupy separate internal stores, require different uptake/conversion/excretion instructions, and can only be found locally;
 - a heritable, mutable tag can be set and searched for by programs;
 - execution traces classify what a genome actually does, not merely how its bytes differ;
 - suspected partnerships can be tested in cloned worlds with either partner removed.

@@ -1,15 +1,5 @@
 name = "scanner"
 seed = false
-description = "Scans 64 cells forward collecting energy deposits before replicating. May absorb leftover energy from dead programs to fund copies."
-# 30 bytes:
-# [0]  SEEK_SELF_START   [1]  TAKE_ENERGY (absorb parent gift)
-# [2]  LOAD_IMM [3] 64   scan counter
-# [4]  LOOP_OPEN  [5] MOV_FWD  [6] TAKE_ENERGY  [7] LOOP_CLOSE
-# [8]  SEEK_SELF_START (reset RH for copy)
-# [9]  LOAD_IMM [10] 30  [11] ALLOC  [12] SET_WRITE_HEAD
-# [13] SEEK_SELF_START   [14] LOAD_IMM [15] 30 (loop counter)
-# [16] LOOP_OPEN  [17] COPY  [18] LOOP_CLOSE
-# [19] LOAD_IMM [20] 30  [21] COMMIT  [22] SET_WRITE_HEAD
-# [23] LOAD_IMM [24] 100 [25] SWAP [26] GIVE_ENERGY
-# [27] LOAD_IMM [28] 30  [29] JMP_BWD → 30-30=0 ✓
-bytes = [5, 31, 12, 64, 23, 1, 31, 24, 5, 12, 30, 25, 11, 5, 12, 30, 23, 10, 24, 12, 30, 26, 11, 12, 100, 17, 30, 12, 30, 20]
+description = "Fixed-width A specialist: takes and converts A while scanning 64 cells before copying its 32-byte genome and excreting retained A to its child."
+# 32 bytes; hard-coded genome lengths and final loop distance include both CONVERT_A opcodes.
+bytes = [5, 31, 44, 12, 64, 23, 1, 31, 44, 24, 5, 12, 32, 25, 11, 5, 12, 32, 23, 10, 24, 12, 32, 26, 11, 12, 100, 17, 30, 12, 32, 20]

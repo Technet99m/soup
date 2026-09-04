@@ -57,6 +57,15 @@ pub enum Event {
         resource: ResourceKind,
         amount: u32,
     },
+    /// An organism converted stored metabolites into usable energy.
+    Metabolized {
+        tick: u64,
+        id: ProgramId,
+        pathway: MetabolicPathway,
+        input_a: u32,
+        input_b: u32,
+        energy_yield: u32,
+    },
     Committed {
         tick: u64,
         parent_id: ProgramId,
@@ -91,6 +100,14 @@ pub enum StructuralMutationKind {
 pub enum ResourceKind {
     A,
     B,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MetabolicPathway {
+    A,
+    B,
+    Combined,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

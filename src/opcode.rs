@@ -30,27 +30,27 @@ pub enum Opcode {
     Split,
     ScanFwd,
     ScanBwd,
-    /// Deposit reg_b energy from own pool into energy_map[wh]. Costs 1 base + energy given.
-    GiveEnergy,
-    /// Transfer all energy at energy_map[rh] to self, zeroing the deposit. Costs 1 base.
-    TakeEnergy,
-    /// Load min(energy_map[rh], 65535) into reg_b. Costs 1 base.
-    SenseEnergy,
+    /// Excrete up to reg_b units of stored A at the write head.
+    ExcreteA,
+    /// Take resource A at the read head into the internal A store.
+    TakeResourceA,
+    /// Sense resource A at the read head into reg_b.
+    SenseResourceA,
     MeasureSelf,
     /// Set read head to reg_b. Mirror of SetWriteHead.
     SetReadHead,
     /// Find nearest memory owned by a different live program (circular from RH).
     /// Sets reg_b to that address. If none found, reg_b unchanged.
     SeekForeignStart,
-    /// Deposit reg_b energy from own pool into energy_map at a 2-byte immediate address.
+    /// Excrete stored A at a two-byte immediate address.
     /// IP advances by 3 (opcode + 2 address bytes).
-    GiveEnergyImm,
-    /// Drain resource B at RH into the organism's energy pool.
+    ExcreteAImm,
+    /// Take resource B at RH into the internal B store.
     TakeResourceB,
     /// Sense resource B at RH into reg_b.
     SenseResourceB,
-    /// Deposit reg_b energy as resource B at WH.
-    GiveResourceB,
+    /// Excrete up to reg_b units of stored B at WH.
+    ExcreteB,
     /// Move RH to the nearest non-empty resource-A cell.
     SeekResourceA,
     /// Move RH to the nearest non-empty resource-B cell.
@@ -59,6 +59,12 @@ pub enum Opcode {
     SetTag,
     /// Find another organism with tag equal to reg_a's low byte; put its address in reg_b.
     SeekTag,
+    /// Convert up to reg_b units of stored A into usable energy (zero means all).
+    ConvertA,
+    /// Convert up to reg_b units of stored B into usable energy (zero means all).
+    ConvertB,
+    /// Combine equal amounts of stored A and B into usable energy.
+    CombineAB,
     Halt,
 }
 
@@ -95,20 +101,23 @@ impl From<u8> for Opcode {
             27 => Self::Split,
             28 => Self::ScanFwd,
             29 => Self::ScanBwd,
-            30 => Self::GiveEnergy,
-            31 => Self::TakeEnergy,
-            32 => Self::SenseEnergy,
+            30 => Self::ExcreteA,
+            31 => Self::TakeResourceA,
+            32 => Self::SenseResourceA,
             33 => Self::MeasureSelf,
             34 => Self::SetReadHead,
             35 => Self::SeekForeignStart,
-            36 => Self::GiveEnergyImm,
+            36 => Self::ExcreteAImm,
             37 => Self::TakeResourceB,
             38 => Self::SenseResourceB,
-            39 => Self::GiveResourceB,
+            39 => Self::ExcreteB,
             40 => Self::SeekResourceA,
             41 => Self::SeekResourceB,
             42 => Self::SetTag,
             43 => Self::SeekTag,
+            44 => Self::ConvertA,
+            45 => Self::ConvertB,
+            46 => Self::CombineAB,
             255 => Self::Halt,
             _ => Self::Nop,
         }
@@ -148,20 +157,23 @@ impl From<Opcode> for u8 {
             Opcode::Split => 27,
             Opcode::ScanFwd => 28,
             Opcode::ScanBwd => 29,
-            Opcode::GiveEnergy => 30,
-            Opcode::TakeEnergy => 31,
-            Opcode::SenseEnergy => 32,
+            Opcode::ExcreteA => 30,
+            Opcode::TakeResourceA => 31,
+            Opcode::SenseResourceA => 32,
             Opcode::MeasureSelf => 33,
             Opcode::SetReadHead => 34,
             Opcode::SeekForeignStart => 35,
-            Opcode::GiveEnergyImm => 36,
+            Opcode::ExcreteAImm => 36,
             Opcode::TakeResourceB => 37,
             Opcode::SenseResourceB => 38,
-            Opcode::GiveResourceB => 39,
+            Opcode::ExcreteB => 39,
             Opcode::SeekResourceA => 40,
             Opcode::SeekResourceB => 41,
             Opcode::SetTag => 42,
             Opcode::SeekTag => 43,
+            Opcode::ConvertA => 44,
+            Opcode::ConvertB => 45,
+            Opcode::CombineAB => 46,
             Opcode::Halt => 255,
         }
     }
@@ -192,6 +204,9 @@ mod tests {
             (26, Opcode::Commit),
             (27, Opcode::Split),
             (33, Opcode::MeasureSelf),
+            (44, Opcode::ConvertA),
+            (45, Opcode::ConvertB),
+            (46, Opcode::CombineAB),
             (255, Opcode::Halt),
         ];
         for &(byte, expected) in named {
@@ -202,7 +217,7 @@ mod tests {
 
     #[test]
     fn nop_range_decodes_as_nop() {
-        for b in 44u8..=254 {
+        for b in 47u8..=254 {
             assert_eq!(Opcode::from(b), Opcode::Nop, "byte {b} should be Nop");
         }
     }
