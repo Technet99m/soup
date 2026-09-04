@@ -1,9 +1,10 @@
+use crate::opcode::Opcode;
 use arrayvec::ArrayVec;
 use uuid::Uuid;
 
 pub type ProgramId = u32;
 
-pub const TRACE_OPCODE_COUNT: usize = 47;
+pub const TRACE_OPCODE_COUNT: usize = Opcode::COUNT as usize;
 
 /// A compact phenotype trace. Genomes are classified by what they execute and
 /// exchange, rather than by byte differences alone.
@@ -39,9 +40,9 @@ impl Default for BehaviorTrace {
 }
 
 impl BehaviorTrace {
-    pub fn record(&mut self, opcode: u8) {
+    pub fn record(&mut self, opcode: Opcode) {
         self.steps += 1;
-        if let Some(count) = self.opcode_counts.get_mut(opcode as usize) {
+        if let Some(count) = self.opcode_counts.get_mut(opcode.index() as usize) {
             *count += 1;
         }
     }

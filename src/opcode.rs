@@ -1,3 +1,4 @@
+#[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Opcode {
     Nop,
@@ -68,6 +69,25 @@ pub enum Opcode {
     Halt,
 }
 
+impl Opcode {
+    pub const COUNT: u8 = 48;
+
+    pub const fn index(self) -> u8 {
+        match self {
+            Self::Halt => Self::COUNT - 1,
+            _ => self as u8,
+        }
+    }
+
+    pub(crate) fn from_index(index: u8) -> Self {
+        if index == Self::COUNT - 1 {
+            Self::Halt
+        } else {
+            Self::from(index)
+        }
+    }
+}
+
 impl From<u8> for Opcode {
     fn from(b: u8) -> Self {
         match b {
@@ -119,7 +139,7 @@ impl From<u8> for Opcode {
             45 => Self::ConvertB,
             46 => Self::CombineAB,
             255 => Self::Halt,
-            _ => Self::Nop,
+            47..=254 => Self::from_index((b - 47) % 48),
         }
     }
 }
@@ -191,34 +211,48 @@ mod tests {
     }
 
     #[test]
-    fn named_opcodes_round_trip() {
-        let named: &[(u8, Opcode)] = &[
-            (0, Opcode::Nop),
-            (1, Opcode::MovFwd),
-            (2, Opcode::MovBwd),
-            (5, Opcode::SeekSelfStart),
-            (12, Opcode::LoadImm),
-            (23, Opcode::LoopOpen),
-            (24, Opcode::LoopClose),
-            (25, Opcode::Alloc),
-            (26, Opcode::Commit),
-            (27, Opcode::Split),
-            (33, Opcode::MeasureSelf),
-            (44, Opcode::ConvertA),
-            (45, Opcode::ConvertB),
-            (46, Opcode::CombineAB),
-            (255, Opcode::Halt),
-        ];
-        for &(byte, expected) in named {
-            assert_eq!(Opcode::from(byte), expected, "byte {byte}");
-            assert_eq!(u8::from(expected), byte, "opcode {expected:?}");
+    fn canonical_opcode_bytes_round_trip() {
+        for byte in 0u8..=46 {
+            let opcode = Opcode::from(byte);
+            assert_eq!(opcode.index(), byte, "canonical byte {byte}");
+            assert_eq!(u8::from(opcode), byte, "opcode {opcode:?}");
         }
+        assert_eq!(Opcode::from(255), Opcode::Halt);
+        assert_eq!(u8::from(Opcode::Halt), 255);
     }
 
     #[test]
-    fn nop_range_decodes_as_nop() {
-        for b in 47u8..=254 {
-            assert_eq!(Opcode::from(b), Opcode::Nop, "byte {b} should be Nop");
+    fn exhaustive_decoding_is_balanced_and_redundant() {
+        let mut encodings: Vec<(Opcode, Vec<u8>)> = Vec::new();
+        for byte in 0u8..=255 {
+            let opcode = Opcode::from(byte);
+            if let Some((_, bytes)) = encodings.iter_mut().find(|(seen, _)| *seen == opcode) {
+                bytes.push(byte);
+            } else {
+                encodings.push((opcode, vec![byte]));
+            }
+        }
+
+        assert_eq!(encodings.len(), 48, "every instruction must be represented");
+        let minimum = encodings
+            .iter()
+            .map(|(_, bytes)| bytes.len())
+            .min()
+            .unwrap();
+        let maximum = encodings
+            .iter()
+            .map(|(_, bytes)| bytes.len())
+            .max()
+            .unwrap();
+        assert!(maximum - minimum <= 1, "alias distribution is not balanced");
+        for (opcode, bytes) in encodings {
+            assert!(
+                bytes.len() <= 64,
+                "{opcode:?} occupies more than 25% of the alphabet"
+            );
+            if opcode != Opcode::Nop {
+                assert!(bytes.len() >= 2, "{opcode:?} needs synonymous encodings");
+            }
         }
     }
 }

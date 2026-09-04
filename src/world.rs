@@ -4,6 +4,7 @@ use crate::{
     events::{DeathCause, Event, ResourceKind, StructuralMutationKind},
     identity::HeritableIdentity,
     memory::Memory,
+    mutation,
     program::{Program, ProgramId},
     template,
     vm::{self, StepResult},
@@ -521,7 +522,7 @@ impl World {
                     if child.length < self.config.max_genome_length =>
                 {
                     mutation_index = self.rng.gen_range(0..=genome.len());
-                    genome.insert(mutation_index, self.rng.gen());
+                    genome.insert(mutation_index, mutation::insert(self.rng.gen()));
                 }
                 StructuralMutationKind::Deletion if genome.len() > 4 => {
                     mutation_index = self.rng.gen_range(0..genome.len());
