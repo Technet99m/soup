@@ -1,5 +1,74 @@
-use crate::program::ProgramId;
+use crate::{identity::HeritableIdentity, program::ProgramId};
 use rand::Rng;
+use std::collections::BTreeMap;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ResourceOrigin {
+    pub donor_id: ProgramId,
+    pub heritable_identity: HeritableIdentity,
+}
+
+impl ResourceOrigin {
+    pub const fn new(donor_id: ProgramId, heritable_identity: HeritableIdentity) -> Self {
+        Self {
+            donor_id,
+            heritable_identity,
+        }
+    }
+}
+
+/// Exact per-origin quantities for one resource deposit.
+/// `None` represents organism-independent environmental resources.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ResourceProvenance {
+    amounts: BTreeMap<Option<ResourceOrigin>, u32>,
+}
+
+impl ResourceProvenance {
+    fn deposit(&mut self, origin: Option<ResourceOrigin>, amount: u32) {
+        *self.amounts.entry(origin).or_default() += amount;
+    }
+
+    fn drain(&mut self, amount: u32) -> Self {
+        let mut remaining = amount;
+        let mut drained = Self::default();
+        let origins: Vec<_> = self.amounts.keys().copied().collect();
+        for origin in origins {
+            if remaining == 0 {
+                break;
+            }
+            let available = self.amounts[&origin];
+            let taken = available.min(remaining);
+            drained.deposit(origin, taken);
+            remaining -= taken;
+            if taken == available {
+                self.amounts.remove(&origin);
+            } else if let Some(stored) = self.amounts.get_mut(&origin) {
+                *stored -= taken;
+            }
+        }
+        debug_assert_eq!(remaining, 0);
+        drained
+    }
+
+    pub fn total(&self) -> u32 {
+        self.amounts.values().copied().sum()
+    }
+
+    pub fn amount_for(&self, origin: ResourceOrigin) -> u32 {
+        self.amounts.get(&Some(origin)).copied().unwrap_or(0)
+    }
+
+    pub fn unattributed(&self) -> u32 {
+        self.amounts.get(&None).copied().unwrap_or(0)
+    }
+
+    pub fn attributed(&self) -> impl Iterator<Item = (ResourceOrigin, u32)> + '_ {
+        self.amounts
+            .iter()
+            .filter_map(|(origin, amount)| origin.map(|origin| (origin, *amount)))
+    }
+}
 
 /// The shared flat memory array. All address arithmetic uses u16 so wrapping
 /// over the 64 KiB boundary is automatic and free.
@@ -10,8 +79,8 @@ pub struct Memory {
     pub energy_map: Box<[u32; 65536]>,
     /// A chemically distinct resource. It has its own seek/sense/take/give opcodes.
     pub resource_b_map: Box<[u32; 65536]>,
-    pub resource_a_donor: Box<[Option<ProgramId>; 65536]>,
-    pub resource_b_donor: Box<[Option<ProgramId>; 65536]>,
+    pub resource_a_provenance: Box<[ResourceProvenance]>,
+    pub resource_b_provenance: Box<[ResourceProvenance]>,
 }
 
 impl Memory {
@@ -20,8 +89,8 @@ impl Memory {
             cells: [0u8; 65536],
             energy_map: boxed_array(0u32),
             resource_b_map: boxed_array(0u32),
-            resource_a_donor: boxed_array(None),
-            resource_b_donor: boxed_array(None),
+            resource_a_provenance: vec![ResourceProvenance::default(); 65536].into_boxed_slice(),
+            resource_b_provenance: vec![ResourceProvenance::default(); 65536].into_boxed_slice(),
         }
     }
 
@@ -99,41 +168,42 @@ impl Memory {
     }
 
     /// Deposit as much as fits and return the accepted amount.
-    pub fn give_energy_from(&mut self, addr: u16, amount: u32, donor: Option<ProgramId>) -> u32 {
+    pub fn give_energy_from(
+        &mut self,
+        addr: u16,
+        amount: u32,
+        origin: Option<ResourceOrigin>,
+    ) -> u32 {
         let index = addr as usize;
         let accepted = amount.min(u32::MAX - self.energy_map[index]);
         if accepted == 0 {
             return 0;
         }
-        let was_empty = self.energy_map[index] == 0;
         self.energy_map[index] += accepted;
-        self.resource_a_donor[index] = if was_empty {
-            donor
-        } else {
-            merge_donor(self.resource_a_donor[index], donor)
-        };
+        self.resource_a_provenance[index].deposit(origin, accepted);
         accepted
     }
 
     /// Drain all deposited energy at `addr`, returning the amount taken.
     #[inline]
     pub fn take_energy(&mut self, addr: u16) -> u32 {
-        self.take_energy_with_donor(addr).0
+        self.take_energy_with_provenance(addr).0
     }
 
-    pub fn take_energy_with_donor(&mut self, addr: u16) -> (u32, Option<ProgramId>) {
+    pub fn take_energy_with_provenance(&mut self, addr: u16) -> (u32, ResourceProvenance) {
         self.take_energy_up_to(addr, u32::MAX)
     }
 
-    pub fn take_energy_up_to(&mut self, addr: u16, limit: u32) -> (u32, Option<ProgramId>) {
+    pub fn take_energy_up_to(&mut self, addr: u16, limit: u32) -> (u32, ResourceProvenance) {
         let index = addr as usize;
         let amount = self.energy_map[index].min(limit);
-        let donor = self.resource_a_donor[index];
         self.energy_map[index] -= amount;
-        if self.energy_map[index] == 0 {
-            self.resource_a_donor[index] = None;
-        }
-        (amount, donor)
+        let provenance = self.resource_a_provenance[index].drain(amount);
+        debug_assert_eq!(
+            self.resource_a_provenance[index].total(),
+            self.energy_map[index]
+        );
+        (amount, provenance)
     }
 
     /// Read deposited energy at `addr` without consuming it.
@@ -152,41 +222,37 @@ impl Memory {
         &mut self,
         addr: u16,
         amount: u32,
-        donor: Option<ProgramId>,
+        origin: Option<ResourceOrigin>,
     ) -> u32 {
         let index = addr as usize;
         let accepted = amount.min(u32::MAX - self.resource_b_map[index]);
         if accepted == 0 {
             return 0;
         }
-        let was_empty = self.resource_b_map[index] == 0;
         self.resource_b_map[index] += accepted;
-        self.resource_b_donor[index] = if was_empty {
-            donor
-        } else {
-            merge_donor(self.resource_b_donor[index], donor)
-        };
+        self.resource_b_provenance[index].deposit(origin, accepted);
         accepted
     }
 
     #[inline]
     pub fn take_resource_b(&mut self, addr: u16) -> u32 {
-        self.take_resource_b_with_donor(addr).0
+        self.take_resource_b_with_provenance(addr).0
     }
 
-    pub fn take_resource_b_with_donor(&mut self, addr: u16) -> (u32, Option<ProgramId>) {
+    pub fn take_resource_b_with_provenance(&mut self, addr: u16) -> (u32, ResourceProvenance) {
         self.take_resource_b_up_to(addr, u32::MAX)
     }
 
-    pub fn take_resource_b_up_to(&mut self, addr: u16, limit: u32) -> (u32, Option<ProgramId>) {
+    pub fn take_resource_b_up_to(&mut self, addr: u16, limit: u32) -> (u32, ResourceProvenance) {
         let index = addr as usize;
         let amount = self.resource_b_map[index].min(limit);
-        let donor = self.resource_b_donor[index];
         self.resource_b_map[index] -= amount;
-        if self.resource_b_map[index] == 0 {
-            self.resource_b_donor[index] = None;
-        }
-        (amount, donor)
+        let provenance = self.resource_b_provenance[index].drain(amount);
+        debug_assert_eq!(
+            self.resource_b_provenance[index].total(),
+            self.resource_b_map[index]
+        );
+        (amount, provenance)
     }
 
     #[inline]
@@ -204,13 +270,6 @@ fn boxed_array<T: Clone>(value: T) -> Box<[T; 65536]> {
     match vec![value; 65536].into_boxed_slice().try_into() {
         Ok(array) => array,
         Err(_) => unreachable!("fixed-length allocation has the requested size"),
-    }
-}
-
-fn merge_donor(existing: Option<ProgramId>, incoming: Option<ProgramId>) -> Option<ProgramId> {
-    match (existing, incoming) {
-        (Some(left), Some(right)) if left == right => Some(left),
-        _ => None,
     }
 }
 
@@ -280,6 +339,65 @@ mod tests {
         m.give_energy(5, 100);
         assert_eq!(m.read(5), 42); // instruction unchanged
         assert_eq!(m.sense_energy(5), 100);
+    }
+
+    #[test]
+    fn provenance_merges_and_partially_drains_resource_a_quantitatively() {
+        let mut memory = Memory::new();
+        let first = ResourceOrigin::new(7, HeritableIdentity::new(11, 3));
+        let second = ResourceOrigin::new(8, HeritableIdentity::new(22, 4));
+
+        assert_eq!(memory.give_energy_from(10, 40, Some(first)), 40);
+        assert_eq!(memory.give_energy_from(10, 70, Some(second)), 70);
+        let (taken, provenance) = memory.take_energy_up_to(10, 60);
+
+        assert_eq!(taken, 60);
+        assert_eq!(provenance.total(), 60);
+        assert_eq!(provenance.amount_for(first), 40);
+        assert_eq!(provenance.amount_for(second), 20);
+        assert_eq!(memory.sense_energy(10), 50);
+        assert_eq!(memory.resource_a_provenance[10].total(), 50);
+        assert_eq!(memory.resource_a_provenance[10].amount_for(second), 50);
+    }
+
+    #[test]
+    fn provenance_is_independent_between_resources_and_tracks_unattributed_amounts() {
+        let mut memory = Memory::new();
+        let donor = ResourceOrigin::new(9, HeritableIdentity::new(33, 5));
+
+        memory.give_energy_from(20, 30, Some(donor));
+        memory.give_energy(20, 10);
+        memory.give_resource_b_from(20, 50, Some(donor));
+        let (taken_a, provenance_a) = memory.take_energy_up_to(20, u32::MAX);
+        let (taken_b, provenance_b) = memory.take_resource_b_up_to(20, u32::MAX);
+
+        assert_eq!(taken_a, 40);
+        assert_eq!(provenance_a.amount_for(donor), 30);
+        assert_eq!(provenance_a.unattributed(), 10);
+        assert_eq!(taken_b, 50);
+        assert_eq!(provenance_b.amount_for(donor), 50);
+        assert_eq!(provenance_b.unattributed(), 0);
+        assert_eq!(provenance_a.total(), taken_a);
+        assert_eq!(provenance_b.total(), taken_b);
+    }
+
+    #[test]
+    fn provenance_merges_and_partially_drains_resource_b_quantitatively() {
+        let mut memory = Memory::new();
+        let first = ResourceOrigin::new(3, HeritableIdentity::new(44, 6));
+        let second = ResourceOrigin::new(4, HeritableIdentity::new(55, 7));
+
+        memory.give_resource_b_from(30, 25, Some(first));
+        memory.give_resource_b_from(30, 35, Some(second));
+        let (taken, provenance) = memory.take_resource_b_up_to(30, 40);
+
+        assert_eq!(taken, 40);
+        assert_eq!(provenance.total(), 40);
+        assert_eq!(provenance.amount_for(first), 25);
+        assert_eq!(provenance.amount_for(second), 15);
+        assert_eq!(memory.sense_resource_b(30), 20);
+        assert_eq!(memory.resource_b_provenance[30].total(), 20);
+        assert_eq!(memory.resource_b_provenance[30].amount_for(second), 20);
     }
 
     #[test]

@@ -2,6 +2,7 @@ use crate::{
     allocator::FreeList,
     config::Config,
     events::{DeathCause, Event, ResourceKind, StructuralMutationKind},
+    identity::HeritableIdentity,
     memory::Memory,
     program::{Program, ProgramId},
     template,
@@ -12,8 +13,8 @@ use std::collections::{HashMap, VecDeque};
 
 #[derive(Debug, Clone)]
 pub struct SymbiosisReport {
-    pub genome_a: u64,
-    pub genome_b: u64,
+    pub heritable_identity_a: HeritableIdentity,
+    pub heritable_identity_b: HeritableIdentity,
     pub horizon: u64,
     pub baseline_births_a: u64,
     pub baseline_births_b: u64,
@@ -64,16 +65,16 @@ pub struct World {
     pub addr_to_owner: Box<[Option<ProgramId>]>,
     /// Current tag by program ID. Dead IDs remain as harmless historical entries.
     pub program_tags: Vec<u8>,
-    /// Successful reproduction attributed to the parent's current genome.
-    pub births_by_parent_genome: HashMap<u64, u64>,
-    /// Tick of the latest successful reproduction by each genome.
-    pub last_birth_by_genome: HashMap<u64, u64>,
-    /// Most recently observed genome for every program ID, retained after death.
-    pub genome_by_id: Vec<u64>,
-    /// Cross-genome resources consumed, keyed by (donor genome, receiver genome).
-    pub interactions: HashMap<(u64, u64), u64>,
-    /// Executed instructions attributed to the genome present before each step.
-    pub steps_by_genome: HashMap<u64, u64>,
+    /// Successful reproduction attributed to the parent's byte-and-tag heritable identity.
+    pub births_by_parent_heritable_identity: HashMap<HeritableIdentity, u64>,
+    /// Tick of the latest successful reproduction by each heritable identity.
+    pub last_birth_by_heritable_identity: HashMap<HeritableIdentity, u64>,
+    /// Most recently observed heritable identity for every program ID, retained after death.
+    pub heritable_identity_by_id: Vec<HeritableIdentity>,
+    /// Cross-identity resources consumed, keyed by (donor, receiver).
+    pub interactions: HashMap<(HeritableIdentity, HeritableIdentity), u64>,
+    /// Executed instructions attributed to the heritable identity present before each step.
+    pub steps_by_heritable_identity: HashMap<HeritableIdentity, u64>,
     pub total_births: u64,
     pub total_deaths: u64,
     pub total_mutations: u64,
@@ -206,9 +207,10 @@ impl World {
             }
             program_tags[prog.id as usize] = prog.tag;
         }
-        let mut genome_by_id = vec![0; num];
+        let mut heritable_identity_by_id = vec![HeritableIdentity::new(0, 0); num];
         for program in programs.values() {
-            genome_by_id[program.id as usize] = genome_hash_in_memory(&memory, program);
+            heritable_identity_by_id[program.id as usize] =
+                HeritableIdentity::new(genome_hash_in_memory(&memory, program), program.tag);
         }
 
         World {
@@ -225,11 +227,11 @@ impl World {
             ambient_pool,
             addr_to_owner,
             program_tags,
-            births_by_parent_genome: HashMap::new(),
-            last_birth_by_genome: HashMap::new(),
-            genome_by_id,
+            births_by_parent_heritable_identity: HashMap::new(),
+            last_birth_by_heritable_identity: HashMap::new(),
+            heritable_identity_by_id,
             interactions: HashMap::new(),
-            steps_by_genome: HashMap::new(),
+            steps_by_heritable_identity: HashMap::new(),
             total_births: 0,
             total_deaths: 0,
             total_mutations: 0,
@@ -249,27 +251,21 @@ impl World {
         let decay_interval = self.config.energy_decay_interval;
         if decay_interval > 0 && self.tick.is_multiple_of(decay_interval) {
             let rate = self.config.energy_decay_rate;
-            for (index, cell) in self.memory.energy_map.iter_mut().enumerate() {
-                let decay = (*cell).min(rate);
-                *cell -= decay;
-                if *cell == 0 {
-                    self.memory.resource_a_donor[index] = None;
-                }
+            for index in 0..self.memory.energy_map.len() {
+                let decay = self.memory.energy_map[index].min(rate);
+                self.memory.take_energy_up_to(index as u16, decay);
                 self.ambient_pool += decay as u64;
             }
-            for (index, cell) in self.memory.resource_b_map.iter_mut().enumerate() {
-                let decay = (*cell).min(rate);
-                *cell -= decay;
-                if *cell == 0 {
-                    self.memory.resource_b_donor[index] = None;
-                }
+            for index in 0..self.memory.resource_b_map.len() {
+                let decay = self.memory.resource_b_map[index].min(rate);
+                self.memory.take_resource_b_up_to(index as u16, decay);
                 self.ambient_pool += decay as u64;
             }
             let current = self.config.energy_current % self.memory.energy_map.len();
             self.memory.energy_map.rotate_right(current);
-            self.memory.resource_a_donor.rotate_right(current);
+            self.memory.resource_a_provenance.rotate_right(current);
             self.memory.resource_b_map.rotate_left(current);
-            self.memory.resource_b_donor.rotate_left(current);
+            self.memory.resource_b_provenance.rotate_left(current);
         }
 
         // External sources have their own deterministic schedule. They never inspect
@@ -302,15 +298,18 @@ impl World {
             }
         }
 
-        let executing_hash = self
+        let executing_heritable_identity = self
             .programs
             .get(&id)
-            .map(|program| self.genome_hash(program))
-            .unwrap_or(0);
-        if let Some(genome) = self.genome_by_id.get_mut(id as usize) {
-            *genome = executing_hash;
+            .map(|program| self.heritable_identity(program))
+            .unwrap_or(HeritableIdentity::new(0, 0));
+        if let Some(heritable_identity) = self.heritable_identity_by_id.get_mut(id as usize) {
+            *heritable_identity = executing_heritable_identity;
         }
-        *self.steps_by_genome.entry(executing_hash).or_default() += 1;
+        *self
+            .steps_by_heritable_identity
+            .entry(executing_heritable_identity)
+            .or_default() += 1;
         let result = {
             let p = self.programs.get_mut(&id).unwrap();
             vm::step(
@@ -330,6 +329,11 @@ impl World {
         if let Some(program) = self.programs.get(&id) {
             if let Some(tag) = self.program_tags.get_mut(id as usize) {
                 *tag = program.tag;
+            }
+            let current_heritable_identity =
+                HeritableIdentity::new(genome_hash_in_memory(&self.memory, program), program.tag);
+            if let Some(heritable_identity) = self.heritable_identity_by_id.get_mut(id as usize) {
+                *heritable_identity = current_heritable_identity;
             }
         }
 
@@ -397,15 +401,20 @@ impl World {
                 }
             }
             StepResult::Spawned(mut child) => {
-                let parent_hash = self
+                let parent_heritable_identity = self
                     .programs
                     .get(&id)
-                    .map(|parent| self.genome_hash(parent))
-                    .unwrap_or(0);
-                *self.births_by_parent_genome.entry(parent_hash).or_default() += 1;
-                self.last_birth_by_genome.insert(parent_hash, self.tick);
+                    .map(|parent| self.heritable_identity(parent))
+                    .unwrap_or(HeritableIdentity::new(0, 0));
+                *self
+                    .births_by_parent_heritable_identity
+                    .entry(parent_heritable_identity)
+                    .or_default() += 1;
+                self.last_birth_by_heritable_identity
+                    .insert(parent_heritable_identity, self.tick);
                 let parent_start = self.programs[&id].start;
                 self.apply_birth_mutations(&mut child, parent_start, &mut events);
+                let child_heritable_identity = self.heritable_identity(&child);
                 events.push(Event::Born {
                     tick: self.tick,
                     id: child.id,
@@ -416,6 +425,7 @@ impl World {
                     length: child.length,
                     energy: child.energy,
                     generation: child.generation,
+                    heritable_identity: child_heritable_identity,
                 });
                 events.push(Event::Committed {
                     tick: self.tick,
@@ -427,10 +437,11 @@ impl World {
                     self.program_tags.resize(child_id as usize + 1, 0);
                 }
                 self.program_tags[child_id as usize] = child.tag;
-                if self.genome_by_id.len() <= child_id as usize {
-                    self.genome_by_id.resize(child_id as usize + 1, 0);
+                if self.heritable_identity_by_id.len() <= child_id as usize {
+                    self.heritable_identity_by_id
+                        .resize(child_id as usize + 1, HeritableIdentity::new(0, 0));
                 }
-                self.genome_by_id[child_id as usize] = self.genome_hash(&child);
+                self.heritable_identity_by_id[child_id as usize] = child_heritable_identity;
                 for offset in 0..child.length as usize {
                     self.addr_to_owner[(child.start as usize + offset) % 65536] = Some(child_id);
                 }
@@ -452,25 +463,33 @@ impl World {
                 Event::ForeignExec { .. } => self.total_foreign_execs += 1,
                 Event::ForeignWrite { .. } => self.total_foreign_writes += 1,
                 Event::ResourceTransfer {
-                    donor_id,
-                    receiver_id,
+                    donor_heritable_identity,
+                    receiver_heritable_identity,
                     amount,
                     ..
                 } => {
-                    let donor = self.genome_by_id.get(*donor_id as usize).copied();
-                    let receiver = self.genome_by_id.get(*receiver_id as usize).copied();
-                    if let (Some(donor), Some(receiver)) = (donor, receiver) {
-                        if donor != receiver {
-                            *self.interactions.entry((donor, receiver)).or_default() +=
-                                *amount as u64;
-                        }
-                    }
+                    self.record_resource_transfer(
+                        *donor_heritable_identity,
+                        *receiver_heritable_identity,
+                        *amount,
+                    );
                 }
                 _ => {}
             }
         }
 
         events
+    }
+
+    fn record_resource_transfer(
+        &mut self,
+        donor: HeritableIdentity,
+        receiver: HeritableIdentity,
+        amount: u32,
+    ) {
+        if donor != receiver {
+            *self.interactions.entry((donor, receiver)).or_default() += amount as u64;
+        }
     }
 
     fn apply_birth_mutations(
@@ -690,18 +709,47 @@ impl World {
         1.0 - free / 65536.0
     }
 
-    /// Stable fingerprint of an organism's current bytes. Equal hashes are exact
-    /// genotypes for the purposes of the live observer.
+    /// Stable fingerprint of an organism's current bytes. Equal hashes represent
+    /// equal byte sequences; recognition state is intentionally represented by `HeritableIdentity`.
     pub fn genome_hash(&self, program: &Program) -> u64 {
         genome_hash_in_memory(&self.memory, program)
     }
 
+    /// Heritable evolutionary identity combines executable bytes and recognition tag.
+    pub fn heritable_identity(&self, program: &Program) -> HeritableIdentity {
+        HeritableIdentity::new(self.genome_hash(program), program.tag)
+    }
+
+    /// Number of distinct live byte sequences, independent of recognition tag.
     pub fn live_genomes(&self) -> usize {
         self.programs
             .values()
             .map(|program| self.genome_hash(program))
             .collect::<std::collections::HashSet<_>>()
             .len()
+    }
+
+    /// Number of distinct live byte-and-tag heritable identities.
+    pub fn live_heritable_identities(&self) -> usize {
+        self.programs
+            .values()
+            .map(|program| self.heritable_identity(program))
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+    }
+
+    /// Remove every live organism with this raw byte genome, regardless of tag.
+    #[cfg(test)]
+    fn remove_genome(&mut self, genome: u64) {
+        let identities: Vec<_> = self
+            .programs
+            .values()
+            .filter(|program| self.genome_hash(program) == genome)
+            .map(|program| self.heritable_identity(program))
+            .collect();
+        for identity in identities {
+            self.remove_heritable_identity(identity);
+        }
     }
 
     /// Byte distance from the startup genome that founded this organism's clade.
@@ -717,29 +765,30 @@ impl World {
         substitutions + genome.len().abs_diff(ancestor.len())
     }
 
-    /// Pick the strongest live candidate pair, preferring abundant genomes with
-    /// opposite A/B harvesting profiles. This is only hypothesis generation;
-    /// `counterfactual_symbiosis` performs the actual removal experiment.
-    pub fn candidate_partner_pair(&self) -> Option<(u64, u64)> {
-        let live_hashes: std::collections::HashSet<_> = self
+    /// Pick the strongest live candidate pair, preserving byte-and-tag clades and
+    /// preferring abundant heritable identities with opposite A/B harvesting profiles. This is
+    /// only hypothesis generation; `counterfactual_symbiosis` performs removal.
+    pub fn candidate_partner_pair(&self) -> Option<(HeritableIdentity, HeritableIdentity)> {
+        let live_heritable_identities: std::collections::HashSet<_> = self
             .programs
             .values()
-            .map(|program| self.genome_hash(program))
+            .map(|program| self.heritable_identity(program))
             .collect();
-        let mut transferred_by_pair: HashMap<(u64, u64), u64> = HashMap::new();
+        let mut transferred_by_pair: HashMap<(HeritableIdentity, HeritableIdentity), u64> =
+            HashMap::new();
         for (&(donor, receiver), &amount) in &self.interactions {
-            let active = |hash: u64| {
-                self.births_by_parent_genome
-                    .get(&hash)
+            let active = |heritable_identity: HeritableIdentity| {
+                self.births_by_parent_heritable_identity
+                    .get(&heritable_identity)
                     .is_some_and(|births| *births >= 2)
                     && self
-                        .last_birth_by_genome
-                        .get(&hash)
+                        .last_birth_by_heritable_identity
+                        .get(&heritable_identity)
                         .is_some_and(|tick| self.tick.saturating_sub(*tick) <= 100_000)
             };
             if donor != receiver
-                && live_hashes.contains(&donor)
-                && live_hashes.contains(&receiver)
+                && live_heritable_identities.contains(&donor)
+                && live_heritable_identities.contains(&receiver)
                 && active(donor)
                 && active(receiver)
             {
@@ -751,10 +800,13 @@ impl World {
                 *transferred_by_pair.entry(pair).or_default() += amount;
             }
         }
-        if let Some((pair, _)) = transferred_by_pair
-            .into_iter()
-            .max_by_key(|(_, amount)| *amount)
-        {
+        if let Some((pair, _)) = transferred_by_pair.into_iter().max_by(
+            |(left_pair, left_amount), (right_pair, right_amount)| {
+                left_amount
+                    .cmp(right_amount)
+                    .then_with(|| right_pair.cmp(left_pair))
+            },
+        ) {
             return Some(pair);
         }
 
@@ -765,48 +817,50 @@ impl World {
             b: u64,
             births: u64,
         }
-        let mut phenotypes: HashMap<u64, Phenotype> = HashMap::new();
+        let mut phenotypes: HashMap<HeritableIdentity, Phenotype> = HashMap::new();
         for program in self.programs.values() {
-            let hash = self.genome_hash(program);
-            let phenotype = phenotypes.entry(hash).or_default();
+            let heritable_identity = self.heritable_identity(program);
+            let phenotype = phenotypes.entry(heritable_identity).or_default();
             phenotype.population += 1;
             phenotype.a += program.trace.opcode_counts[31];
             phenotype.b += program.trace.opcode_counts[37];
             phenotype.births = self
-                .births_by_parent_genome
-                .get(&hash)
+                .births_by_parent_heritable_identity
+                .get(&heritable_identity)
                 .copied()
                 .unwrap_or(0);
         }
         let mut live: Vec<_> = phenotypes.into_iter().collect();
         let has_active_pair = live
             .iter()
-            .filter(|(hash, phenotype)| {
+            .filter(|(heritable_identity, phenotype)| {
                 phenotype.births >= 2
                     && self
-                        .last_birth_by_genome
-                        .get(hash)
+                        .last_birth_by_heritable_identity
+                        .get(heritable_identity)
                         .is_some_and(|tick| self.tick.saturating_sub(*tick) <= 100_000)
             })
             .count()
             >= 2;
         if has_active_pair {
-            live.retain(|(hash, phenotype)| {
+            live.retain(|(heritable_identity, phenotype)| {
                 phenotype.births >= 2
                     && self
-                        .last_birth_by_genome
-                        .get(hash)
+                        .last_birth_by_heritable_identity
+                        .get(heritable_identity)
                         .is_some_and(|tick| self.tick.saturating_sub(*tick) <= 100_000)
             });
         }
-        live.sort_by_key(|(_, phenotype)| std::cmp::Reverse(phenotype.population));
+        live.sort_by_key(|(identity, phenotype)| {
+            (std::cmp::Reverse(phenotype.population), *identity)
+        });
         live.truncate(12);
 
-        let mut best = None;
+        let mut best: Option<((HeritableIdentity, HeritableIdentity), f64)> = None;
         for left in 0..live.len() {
             for right in left + 1..live.len() {
-                let (hash_a, a) = &live[left];
-                let (hash_b, b) = &live[right];
+                let (heritable_identity_a, a) = &live[left];
+                let (heritable_identity_b, b) = &live[right];
                 let preference_a = a.a as f64 / (a.a + a.b).max(1) as f64;
                 let preference_b = b.a as f64 / (b.a + b.b).max(1) as f64;
                 let complement = (preference_a - preference_b).abs();
@@ -815,36 +869,48 @@ impl World {
                 let score = abundance * 1_000_000.0
                     + reproductive_evidence * 1_000.0
                     + complement * 10_000.0;
-                if best.is_none_or(|(_, _, best_score)| score > best_score) {
-                    best = Some((*hash_a, *hash_b, score));
+                let pair = (*heritable_identity_a, *heritable_identity_b);
+                if best.is_none_or(|(best_pair, best_score)| {
+                    score
+                        .total_cmp(&best_score)
+                        .then_with(|| best_pair.cmp(&pair))
+                        .is_gt()
+                }) {
+                    best = Some((pair, score));
                 }
             }
         }
-        best.map(|(a, b, _)| (a, b))
+        best.map(|(pair, _)| pair)
     }
 
     /// Clone the present ecosystem three ways: intact, without B, and without A.
     /// Reproduction is normalized by instructions executed, preventing the
     /// removed organisms' freed CPU share from masquerading as a benefit.
     pub fn counterfactual_symbiosis(&self, horizon: u64) -> Option<SymbiosisReport> {
-        let (genome_a, genome_b) = self.candidate_partner_pair()?;
+        let (heritable_identity_a, heritable_identity_b) = self.candidate_partner_pair()?;
         let mut intact = self.clone();
         let mut without_b = self.clone();
         let mut without_a = self.clone();
-        without_b.remove_genome(genome_b);
-        without_a.remove_genome(genome_a);
+        without_b.remove_heritable_identity(heritable_identity_b);
+        without_a.remove_heritable_identity(heritable_identity_a);
 
-        let intact_before = intact.measure_genomes(genome_a, genome_b);
-        let without_b_before = without_b.measure_genomes(genome_a, genome_b);
-        let without_a_before = without_a.measure_genomes(genome_a, genome_b);
+        let intact_before =
+            intact.measure_heritable_identities(heritable_identity_a, heritable_identity_b);
+        let without_b_before =
+            without_b.measure_heritable_identities(heritable_identity_a, heritable_identity_b);
+        let without_a_before =
+            without_a.measure_heritable_identities(heritable_identity_a, heritable_identity_b);
         for _ in 0..horizon {
             intact.tick();
             without_b.tick();
             without_a.tick();
         }
-        let intact_after = intact.measure_genomes(genome_a, genome_b);
-        let without_b_after = without_b.measure_genomes(genome_a, genome_b);
-        let without_a_after = without_a.measure_genomes(genome_a, genome_b);
+        let intact_after =
+            intact.measure_heritable_identities(heritable_identity_a, heritable_identity_b);
+        let without_b_after =
+            without_b.measure_heritable_identities(heritable_identity_a, heritable_identity_b);
+        let without_a_after =
+            without_a.measure_heritable_identities(heritable_identity_a, heritable_identity_b);
 
         let baseline_a = intact_after.0.saturating_sub(intact_before.0);
         let baseline_b = intact_after.1.saturating_sub(intact_before.1);
@@ -873,8 +939,8 @@ impl World {
             _ => RelationshipVerdict::Inconclusive,
         };
         Some(SymbiosisReport {
-            genome_a,
-            genome_b,
+            heritable_identity_a,
+            heritable_identity_b,
             horizon,
             baseline_births_a: baseline_a,
             baseline_births_b: baseline_b,
@@ -884,20 +950,36 @@ impl World {
         })
     }
 
-    fn measure_genomes(&self, a: u64, b: u64) -> (u64, u64, u64, u64) {
+    fn measure_heritable_identities(
+        &self,
+        a: HeritableIdentity,
+        b: HeritableIdentity,
+    ) -> (u64, u64, u64, u64) {
         (
-            self.births_by_parent_genome.get(&a).copied().unwrap_or(0),
-            self.births_by_parent_genome.get(&b).copied().unwrap_or(0),
-            self.steps_by_genome.get(&a).copied().unwrap_or(0),
-            self.steps_by_genome.get(&b).copied().unwrap_or(0),
+            self.births_by_parent_heritable_identity
+                .get(&a)
+                .copied()
+                .unwrap_or(0),
+            self.births_by_parent_heritable_identity
+                .get(&b)
+                .copied()
+                .unwrap_or(0),
+            self.steps_by_heritable_identity
+                .get(&a)
+                .copied()
+                .unwrap_or(0),
+            self.steps_by_heritable_identity
+                .get(&b)
+                .copied()
+                .unwrap_or(0),
         )
     }
 
-    fn remove_genome(&mut self, genome: u64) {
+    fn remove_heritable_identity(&mut self, heritable_identity: HeritableIdentity) {
         let ids: Vec<_> = self
             .programs
             .values()
-            .filter(|program| self.genome_hash(program) == genome)
+            .filter(|program| self.heritable_identity(program) == heritable_identity)
             .map(|program| program.id)
             .collect();
         for id in ids {
@@ -951,6 +1033,7 @@ fn genome_hash_in_memory(memory: &Memory, program: &Program) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::identity::HeritableIdentity;
     use std::path::PathBuf;
 
     /// Config that skips the templates directory so tests always fall back to the
@@ -960,6 +1043,238 @@ mod tests {
             templates_dir: PathBuf::from("/nonexistent_soup_test_templates"),
             ..Config::default()
         }
+    }
+
+    fn add_seed_clone(world: &mut World, id: ProgramId, tag: u8) -> HeritableIdentity {
+        let source = &world.programs[&0];
+        let bytes = world.memory.read_slice(source.start, source.length);
+        let start = world
+            .free_list
+            .alloc(source.length)
+            .expect("space for test organism");
+        world.memory.place(start, &bytes);
+        let mut program = Program::new(id, start, source.length, 1_000, Some(0), None, None);
+        program.tag = tag;
+        for offset in 0..program.length {
+            world.addr_to_owner[start.wrapping_add(offset) as usize] = Some(id);
+        }
+        if world.program_tags.len() <= id as usize {
+            world.program_tags.resize(id as usize + 1, 0);
+        }
+        world.program_tags[id as usize] = tag;
+        let heritable_identity = world.heritable_identity(&program);
+        world.programs.insert(id, program);
+        heritable_identity
+    }
+
+    #[test]
+    fn heritable_identity_distinguishes_recognition_tag_and_genome_collisions() {
+        let mut world = World::new(seed_config());
+        let program = world.programs[&0].clone();
+        let genome = world.genome_hash(&program);
+
+        let mut other_tag = program.clone();
+        other_tag.tag = 7;
+        assert_eq!(world.genome_hash(&other_tag), genome);
+        assert_ne!(
+            world.heritable_identity(&program),
+            world.heritable_identity(&other_tag)
+        );
+
+        let original_heritable_identity = world.heritable_identity(&program);
+        let mut other_genome = program.clone();
+        world.memory.write(other_genome.start, 255);
+        other_genome.tag = program.tag;
+        assert_ne!(
+            original_heritable_identity,
+            world.heritable_identity(&other_genome)
+        );
+    }
+
+    #[test]
+    fn offspring_inherit_parent_tag_and_lineage_event_identity() {
+        let mut cfg = seed_config();
+        cfg.initial_energy = 10_000;
+        cfg.mutation_rate = 0.0;
+        cfg.insertion_rate = 0.0;
+        cfg.deletion_rate = 0.0;
+        cfg.duplication_rate = 0.0;
+        cfg.tag_mutation_rate = 0.0;
+        let mut world = World::new(cfg);
+        world.programs.get_mut(&0).unwrap().tag = 23;
+        world.program_tags[0] = 23;
+
+        let born = (0..10_000).find_map(|_| {
+            world
+                .tick()
+                .into_iter()
+                .find(|event| matches!(event, Event::Born { .. }))
+        });
+
+        let Event::Born {
+            id,
+            heritable_identity,
+            ..
+        } = born.expect("tagged child")
+        else {
+            unreachable!()
+        };
+        assert_eq!(heritable_identity.tag, 23);
+        assert_eq!(world.programs[&id].tag, 23);
+        assert_eq!(
+            world.heritable_identity(&world.programs[&id]),
+            heritable_identity
+        );
+    }
+
+    #[test]
+    fn tag_mutation_creates_a_new_child_heritable_identity() {
+        let mut cfg = seed_config();
+        cfg.initial_energy = 10_000;
+        cfg.mutation_rate = 0.0;
+        cfg.insertion_rate = 0.0;
+        cfg.deletion_rate = 0.0;
+        cfg.duplication_rate = 0.0;
+        cfg.tag_mutation_rate = 1.0;
+        let mut world = World::new(cfg);
+        let parent_heritable_identity = world.heritable_identity(&world.programs[&0]);
+
+        let mut tag_change = None;
+        let child_id = (0..10_000).find_map(|_| {
+            let events = world.tick();
+            tag_change = tag_change.or_else(|| {
+                events.iter().find_map(|event| match event {
+                    Event::TagChanged {
+                        id,
+                        old_tag,
+                        new_tag,
+                        ..
+                    } => Some((*id, *old_tag, *new_tag)),
+                    _ => None,
+                })
+            });
+            events.into_iter().find_map(|event| match event {
+                Event::Born { id, .. } => Some(id),
+                _ => None,
+            })
+        });
+
+        let child_id = child_id.expect("mutated child");
+        let child = &world.programs[&child_id];
+        let (changed_id, old_tag, new_tag) = tag_change.expect("tag mutation event");
+        assert_eq!(changed_id, child_id);
+        assert_eq!(old_tag, parent_heritable_identity.tag);
+        assert_eq!(new_tag, child.tag);
+        assert_ne!(child.tag, parent_heritable_identity.tag);
+        assert_ne!(world.heritable_identity(child), parent_heritable_identity);
+    }
+
+    #[test]
+    fn provenance_attribution_does_not_follow_later_tag_changes_or_death() {
+        let mut world = World::new(seed_config());
+        let deposited = world.heritable_identity(&world.programs[&0]);
+        let receiver = HeritableIdentity::new(deposited.genome ^ 1, 42);
+
+        world.programs.get_mut(&0).unwrap().tag = 99;
+        let changed = world.heritable_identity(&world.programs[&0]);
+        world.programs.remove(&0);
+        world.record_resource_transfer(deposited, receiver, 77);
+
+        assert_eq!(world.interactions.get(&(deposited, receiver)), Some(&77));
+        assert!(!world.interactions.contains_key(&(changed, receiver)));
+    }
+
+    #[test]
+    fn candidate_selection_and_removal_preserve_tag_defined_clades() {
+        let mut world = World::new(seed_config());
+        world.programs.get_mut(&0).unwrap().tag = 3;
+        world.program_tags[0] = 3;
+        let first = world.heritable_identity(&world.programs[&0]);
+        let second = add_seed_clone(&mut world, 1, 9);
+        assert_eq!(world.live_genomes(), 1);
+        assert_eq!(world.live_heritable_identities(), 2);
+
+        let pair = world.candidate_partner_pair().expect("two tag clades");
+        assert_eq!(
+            std::collections::HashSet::from([pair.0, pair.1]),
+            [first, second].into()
+        );
+
+        world.remove_heritable_identity(first);
+        assert_eq!(world.live_count(), 1);
+        assert_eq!(
+            world.heritable_identity(world.programs.values().next().unwrap()),
+            second
+        );
+    }
+
+    #[test]
+    fn candidate_transfer_ties_are_independent_of_insertion_order() {
+        fn candidate_with_order(
+            reverse: bool,
+        ) -> (
+            (HeritableIdentity, HeritableIdentity),
+            (HeritableIdentity, HeritableIdentity),
+        ) {
+            let mut world = World::new(seed_config());
+            world.programs.get_mut(&0).unwrap().tag = 1;
+            let first = world.heritable_identity(&world.programs[&0]);
+            let second = add_seed_clone(&mut world, 1, 2);
+            let third = add_seed_clone(&mut world, 2, 3);
+            for identity in [first, second, third] {
+                world
+                    .births_by_parent_heritable_identity
+                    .insert(identity, 2);
+                world.last_birth_by_heritable_identity.insert(identity, 0);
+            }
+            let mut transfers = [((first, second), 50), ((first, third), 50)];
+            if reverse {
+                transfers.reverse();
+            }
+            for (pair, amount) in transfers {
+                world.interactions.insert(pair, amount);
+            }
+            (
+                world.candidate_partner_pair().expect("candidate pair"),
+                std::cmp::min((first, second), (first, third)),
+            )
+        }
+
+        let (forward, expected) = candidate_with_order(false);
+        let (reverse, reverse_expected) = candidate_with_order(true);
+        assert_eq!(forward, reverse);
+        assert_eq!(expected, reverse_expected);
+        assert_eq!(forward, expected);
+    }
+
+    #[test]
+    fn candidate_fallback_ties_are_independent_of_program_insertion_order() {
+        fn candidate_with_order(reverse: bool) -> (HeritableIdentity, HeritableIdentity) {
+            let mut world = World::new(seed_config());
+            world.programs.get_mut(&0).unwrap().tag = 1;
+            let second_identity = add_seed_clone(&mut world, 1, 2);
+            let third_identity = add_seed_clone(&mut world, 2, 3);
+            let first = world.programs.remove(&0).unwrap();
+            let first_identity = world.heritable_identity(&first);
+            if reverse {
+                world.programs.insert(0, first);
+            } else {
+                let second = world.programs.remove(&1).unwrap();
+                let third = world.programs.remove(&2).unwrap();
+                world.programs.insert(0, first);
+                world.programs.insert(1, second);
+                world.programs.insert(2, third);
+            }
+            let mut identities = [first_identity, second_identity, third_identity];
+            identities.sort();
+            assert_eq!(
+                world.candidate_partner_pair(),
+                Some((identities[0], identities[1]))
+            );
+            world.candidate_partner_pair().unwrap()
+        }
+
+        assert_eq!(candidate_with_order(false), candidate_with_order(true));
     }
 
     #[test]
@@ -995,6 +1310,33 @@ mod tests {
 
         assert_eq!(world.memory.sense_energy(60_000), 0);
         assert_eq!(world.memory.sense_energy(60_017), 123);
+    }
+
+    #[test]
+    fn opposing_currents_move_each_resource_with_its_provenance() {
+        let mut cfg = seed_config();
+        cfg.resource_sources.clear();
+        cfg.energy_decay_interval = 1;
+        cfg.energy_decay_rate = 0;
+        cfg.energy_current = 17;
+        let mut world = World::new(cfg);
+        let identity = world.heritable_identity(&world.programs[&0]);
+        let origin = crate::memory::ResourceOrigin::new(0, identity);
+        world.memory.give_energy_from(60_000, 123, Some(origin));
+        world.memory.give_resource_b_from(60_000, 456, Some(origin));
+
+        world.tick();
+
+        assert_eq!(
+            world.memory.resource_a_provenance[60_017].amount_for(origin),
+            123
+        );
+        assert_eq!(
+            world.memory.resource_b_provenance[59_983].amount_for(origin),
+            456
+        );
+        assert_eq!(world.memory.resource_a_provenance[60_000].total(), 0);
+        assert_eq!(world.memory.resource_b_provenance[60_000].total(), 0);
     }
 
     #[test]
@@ -1293,11 +1635,12 @@ mod tests {
     }
 
     #[test]
-    fn saturated_source_cell_preserves_existing_donor() {
+    fn saturated_source_cell_preserves_existing_provenance() {
         let mut world = World::new(seed_config());
         let start = 123;
-        world.memory.energy_map[start as usize] = u32::MAX;
-        world.memory.resource_a_donor[start as usize] = Some(7);
+        let identity = world.heritable_identity(&world.programs[&0]);
+        let origin = crate::memory::ResourceOrigin::new(7, identity);
+        world.memory.give_energy_from(start, u32::MAX, Some(origin));
         let ambient_before = world.ambient_pool;
 
         world.apply_resource_deposit(ResourceDeposit {
@@ -1307,7 +1650,10 @@ mod tests {
             amount: 10,
         });
 
-        assert_eq!(world.memory.resource_a_donor[start as usize], Some(7));
+        assert_eq!(
+            world.memory.resource_a_provenance[start as usize].amount_for(origin),
+            u32::MAX
+        );
         assert_eq!(world.ambient_pool, ambient_before);
     }
 

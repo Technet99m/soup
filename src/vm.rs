@@ -2,7 +2,8 @@ use crate::{
     allocator::FreeList,
     config::Config,
     events::{Event, MetabolicPathway, ResourceKind},
-    memory::Memory,
+    identity::HeritableIdentity,
+    memory::{Memory, ResourceOrigin},
     opcode::Opcode,
     program::{Program, ProgramId},
 };
@@ -55,6 +56,7 @@ pub fn step(
     *ambient += 1;
 
     let raw_opcode = mem.read(p.ip);
+    let executing_heritable_identity = HeritableIdentity::new(genome_hash(mem, p), p.tag);
     let opcode = Opcode::from(raw_opcode);
     p.trace.record(raw_opcode);
     let ip = p.ip;
@@ -348,22 +350,28 @@ pub fn step(
         // --- Metabolite uptake, excretion, and conversion ---
         Opcode::ExcreteA => {
             let amount = (p.reg_b as u32).min(p.metabolite_a);
-            let deposited = mem.give_energy_from(p.wh, amount, Some(p.id));
+            let origin = ResourceOrigin::new(p.id, executing_heritable_identity);
+            let deposited = mem.give_energy_from(p.wh, amount, Some(origin));
             p.metabolite_a -= deposited;
             p.trace.given_a += deposited as u64;
         }
 
         Opcode::TakeResourceA => {
-            let (gained, donor) = mem.take_energy_up_to(p.rh, u32::MAX - p.metabolite_a);
+            let (gained, provenance) = mem.take_energy_up_to(p.rh, u32::MAX - p.metabolite_a);
             p.metabolite_a += gained;
             p.trace.harvested_a += gained as u64;
-            if let Some(donor_id) = donor.filter(|donor_id| gained > 0 && *donor_id != p.id) {
+            for (origin, amount) in provenance
+                .attributed()
+                .filter(|(origin, _)| origin.donor_id != p.id)
+            {
                 events.push(Event::ResourceTransfer {
                     tick,
-                    donor_id,
+                    donor_id: origin.donor_id,
+                    donor_heritable_identity: origin.heritable_identity,
                     receiver_id: p.id,
+                    receiver_heritable_identity: executing_heritable_identity,
                     resource: ResourceKind::A,
-                    amount: gained,
+                    amount,
                 });
             }
         }
@@ -426,23 +434,29 @@ pub fn step(
             let hi = mem.read(ip.wrapping_add(2)) as u16;
             let target = lo | (hi << 8);
             let amount = (p.reg_b as u32).min(p.metabolite_a);
-            let deposited = mem.give_energy_from(target, amount, Some(p.id));
+            let origin = ResourceOrigin::new(p.id, executing_heritable_identity);
+            let deposited = mem.give_energy_from(target, amount, Some(origin));
             p.metabolite_a -= deposited;
             p.trace.given_a += deposited as u64;
             ip_next = ip.wrapping_add(3);
         }
 
         Opcode::TakeResourceB => {
-            let (gained, donor) = mem.take_resource_b_up_to(p.rh, u32::MAX - p.metabolite_b);
+            let (gained, provenance) = mem.take_resource_b_up_to(p.rh, u32::MAX - p.metabolite_b);
             p.metabolite_b += gained;
             p.trace.harvested_b += gained as u64;
-            if let Some(donor_id) = donor.filter(|donor_id| gained > 0 && *donor_id != p.id) {
+            for (origin, amount) in provenance
+                .attributed()
+                .filter(|(origin, _)| origin.donor_id != p.id)
+            {
                 events.push(Event::ResourceTransfer {
                     tick,
-                    donor_id,
+                    donor_id: origin.donor_id,
+                    donor_heritable_identity: origin.heritable_identity,
                     receiver_id: p.id,
+                    receiver_heritable_identity: executing_heritable_identity,
                     resource: ResourceKind::B,
-                    amount: gained,
+                    amount,
                 });
             }
         }
@@ -453,7 +467,8 @@ pub fn step(
 
         Opcode::ExcreteB => {
             let amount = (p.reg_b as u32).min(p.metabolite_b);
-            let deposited = mem.give_resource_b_from(p.wh, amount, Some(p.id));
+            let origin = ResourceOrigin::new(p.id, executing_heritable_identity);
+            let deposited = mem.give_resource_b_from(p.wh, amount, Some(origin));
             p.metabolite_b -= deposited;
             p.trace.given_b += deposited as u64;
         }
@@ -596,6 +611,15 @@ pub fn step(
     p.ip = ip_next;
     p.age += 1;
     StepResult::Continue
+}
+
+fn genome_hash(memory: &Memory, program: &Program) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in memory.read_slice(program.start, program.length) {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash ^ program.length as u64
 }
 
 #[cfg(test)]
@@ -1047,7 +1071,7 @@ mod tests {
         assert_eq!(p.trace.combined_ab, 3);
     }
     #[test]
-    fn cross_feeding_excretes_uptakes_and_converts_b() {
+    fn another_organism_emits_transfer_with_deposit_time_identity_after_donor_changes() {
         let cfg = Config::default();
         let mut next_id = 100;
         let mut rng = StdRng::seed_from_u64(0);
@@ -1073,6 +1097,12 @@ mod tests {
         );
         assert_eq!(donor.metabolite_b, 0);
         assert_eq!(mem.sense_resource_b(0), 200);
+        let deposited_identity = HeritableIdentity::new(genome_hash(&mem, &donor), 0);
+        donor.tag = 99;
+        mem.write(donor.start, 254);
+        let changed_identity = HeritableIdentity::new(genome_hash(&mem, &donor), donor.tag);
+        assert_ne!(deposited_identity, changed_identity);
+        drop(donor);
 
         mem.place(10, &[37u8, 45]);
         let mut receiver_fl = FreeList::new(12, 65524);
@@ -1102,11 +1132,120 @@ mod tests {
             Event::ResourceTransfer {
                 tick: 9,
                 donor_id: 2,
+                donor_heritable_identity,
                 receiver_id: 1,
+                receiver_heritable_identity,
                 resource: ResourceKind::B,
                 amount: 200,
-            }
+                ..
+            } if *donor_heritable_identity == deposited_identity
+                && donor_heritable_identity.tag == 0
+                && receiver_heritable_identity.tag == 0
         )));
+    }
+
+    #[test]
+    fn same_organism_after_identity_change_is_not_a_resource_transfer() {
+        let cfg = Config::default();
+        let mut next_id = 100;
+        let mut rng = StdRng::seed_from_u64(0);
+        let mut events = Vec::new();
+        let mut ambient = 0;
+        let (mut organism, mut mem, mut fl) = make_program(&[39u8], 100);
+        organism.reg_b = 200;
+        organism.metabolite_b = 200;
+
+        let _ = step(
+            &mut organism,
+            &mut mem,
+            &mut fl,
+            &NO_OWNERS,
+            &NO_TAGS,
+            &cfg,
+            &mut next_id,
+            &mut rng,
+            &mut events,
+            8,
+            &mut ambient,
+        );
+        assert_eq!(organism.metabolite_b, 0);
+        assert_eq!(mem.sense_resource_b(organism.start), 200);
+        let deposited_identity = HeritableIdentity::new(genome_hash(&mem, &organism), 0);
+
+        organism.tag = 99;
+        mem.write(organism.start, 37);
+        organism.ip = organism.start;
+        organism.rh = organism.start;
+        let changed_identity = HeritableIdentity::new(genome_hash(&mem, &organism), organism.tag);
+        assert_ne!(deposited_identity, changed_identity);
+
+        let _ = step(
+            &mut organism,
+            &mut mem,
+            &mut fl,
+            &NO_OWNERS,
+            &NO_TAGS,
+            &cfg,
+            &mut next_id,
+            &mut rng,
+            &mut events,
+            9,
+            &mut ambient,
+        );
+
+        assert_eq!(organism.metabolite_b, 200);
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, Event::ResourceTransfer { .. })));
+    }
+
+    #[test]
+    fn commit_and_split_inherit_recognition_tag() {
+        for opcode in [26u8, 27u8] {
+            let code = [25u8, opcode];
+            let (mut p, mut mem, mut fl) = make_program(&code, 100);
+            p.reg_a = 1;
+            p.tag = 91;
+            let cfg = Config::default();
+            let mut next_id = 100;
+            let mut rng = StdRng::seed_from_u64(0);
+            let mut events = Vec::new();
+            let mut ambient = 0;
+
+            assert!(matches!(
+                step(
+                    &mut p,
+                    &mut mem,
+                    &mut fl,
+                    &NO_OWNERS,
+                    &NO_TAGS,
+                    &cfg,
+                    &mut next_id,
+                    &mut rng,
+                    &mut events,
+                    0,
+                    &mut ambient,
+                ),
+                StepResult::Continue
+            ));
+            let result = step(
+                &mut p,
+                &mut mem,
+                &mut fl,
+                &NO_OWNERS,
+                &NO_TAGS,
+                &cfg,
+                &mut next_id,
+                &mut rng,
+                &mut events,
+                1,
+                &mut ambient,
+            );
+            let StepResult::Spawned(child) = result else {
+                panic!("opcode {opcode} did not spawn");
+            };
+            assert_eq!(child.tag, 91, "opcode {opcode}");
+        }
     }
 
     #[test]
@@ -1136,6 +1275,41 @@ mod tests {
             &mut ambient,
         );
         assert_eq!(p.reg_b, 123);
+        assert_eq!(p.trace.tag_seeks, 1);
+    }
+
+    #[test]
+    fn seek_tag_skips_self_and_nonmatching_tag_collisions() {
+        let code = [43u8, 255];
+        let (mut p, mut mem, mut fl) = make_program(&code, 100);
+        p.reg_a = 7;
+        p.rh = 100;
+        let mut owners = vec![None; 65536];
+        owners[100] = Some(p.id);
+        owners[101] = Some(2);
+        owners[102] = Some(3);
+        let tags = [0, 7, 8, 7];
+        let cfg = Config::default();
+        let mut next_id = 100;
+        let mut rng = StdRng::seed_from_u64(0);
+        let mut events = Vec::new();
+        let mut ambient = 0;
+
+        let _ = step(
+            &mut p,
+            &mut mem,
+            &mut fl,
+            &owners,
+            &tags,
+            &cfg,
+            &mut next_id,
+            &mut rng,
+            &mut events,
+            0,
+            &mut ambient,
+        );
+
+        assert_eq!(p.reg_b, 102);
         assert_eq!(p.trace.tag_seeks, 1);
     }
 

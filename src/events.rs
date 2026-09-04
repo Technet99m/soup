@@ -1,4 +1,4 @@
-use crate::program::ProgramId;
+use crate::{identity::HeritableIdentity, program::ProgramId};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -22,6 +22,8 @@ pub enum Event {
         length: u16,
         energy: u32,
         generation: u32,
+        /// The child's byte genome plus recognition tag at birth.
+        heritable_identity: HeritableIdentity,
     },
     Died {
         tick: u64,
@@ -49,11 +51,14 @@ pub enum Event {
         old_tag: u8,
         new_tag: u8,
     },
-    /// A resource deposited by one organism was consumed by another.
+    /// A resource deposited by one organism was consumed by another ProgramId.
+    /// The donor identity is the deposit-time snapshot used for attribution.
     ResourceTransfer {
         tick: u64,
         donor_id: ProgramId,
+        donor_heritable_identity: HeritableIdentity,
         receiver_id: ProgramId,
+        receiver_heritable_identity: HeritableIdentity,
         resource: ResourceKind,
         amount: u32,
     },
