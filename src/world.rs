@@ -62,7 +62,7 @@ pub struct World {
     /// resource maps; deaths return remaining program energy here.
     pub ambient_pool: u64,
     /// Per-cell ownership map: addr_to_owner[addr] = Some(id) if a live program owns that byte.
-    /// Kept in sync on spawn and death; used by SeekForeignStart and ForeignExec tracking.
+    /// Kept in sync on spawn and death; used by local organism seeks and ForeignExec tracking.
     pub addr_to_owner: Box<[Option<ProgramId>]>,
     /// Current tag by program ID. Dead IDs remain as harmless historical entries.
     pub program_tags: Vec<u8>,

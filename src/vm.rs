@@ -22,6 +22,35 @@ pub enum StepResult {
     Spawned(Box<Program>),
 }
 
+/// Find the nearest matching address in a circular neighborhood.
+///
+/// Distance zero is considered first. At every positive distance the forward
+/// address is considered before the backward address, providing a stable tie
+/// break. The radius is inclusive and capped at the ring's 32,768-cell
+/// antipode so every address is considered at most once.
+fn nearest_in_circular_neighborhood(
+    origin: u16,
+    radius: u16,
+    mut matches: impl FnMut(u16) -> bool,
+) -> Option<u16> {
+    if matches(origin) {
+        return Some(origin);
+    }
+
+    for distance in 1..=radius.min(1 << 15) {
+        let forward = origin.wrapping_add(distance);
+        if matches(forward) {
+            return Some(forward);
+        }
+
+        let backward = origin.wrapping_sub(distance);
+        if backward != forward && matches(backward) {
+            return Some(backward);
+        }
+    }
+    None
+}
+
 /// Execute one instruction for `p`. Mutates program state in place.
 /// Returns the result of the step.
 ///
@@ -415,17 +444,17 @@ pub fn step(
         // SET_READ_HEAD: RH = reg_b. Mirror of SetWriteHead.
         Opcode::SetReadHead => p.rh = p.reg_b,
 
-        // SEEK_FOREIGN_START: scan circularly from RH for the nearest address owned
-        // by a different live program. Sets reg_b to that address if found.
+        // SEEK_FOREIGN_START: search the inclusive local circular neighborhood for
+        // the nearest address owned by another live program. Leave B unchanged on
+        // failure. Forward wins an exact-distance tie.
         Opcode::SeekForeignStart => {
-            for i in 0..65536u32 {
-                let addr = p.rh.wrapping_add(i as u16);
-                if let Some(owner) = addr_to_owner[addr as usize] {
-                    if owner != p.id {
-                        p.reg_b = addr;
-                        break;
-                    }
-                }
+            p.trace.foreign_seeks += 1;
+            if let Some(addr) =
+                nearest_in_circular_neighborhood(p.rh, cfg.interaction_radius, |addr| {
+                    addr_to_owner[addr as usize].is_some_and(|owner| owner != p.id)
+                })
+            {
+                p.reg_b = addr;
             }
         }
 
@@ -589,14 +618,14 @@ pub fn step(
         Opcode::SeekTag => {
             p.trace.tag_seeks += 1;
             let target = p.reg_a as u8;
-            for distance in 0..=cfg.interaction_radius {
-                let addr = p.rh.wrapping_add(distance);
-                if let Some(owner) = addr_to_owner[addr as usize] {
-                    if owner != p.id && program_tags.get(owner as usize) == Some(&target) {
-                        p.reg_b = addr;
-                        break;
-                    }
-                }
+            if let Some(addr) =
+                nearest_in_circular_neighborhood(p.rh, cfg.interaction_radius, |addr| {
+                    addr_to_owner[addr as usize].is_some_and(|owner| {
+                        owner != p.id && program_tags.get(owner as usize) == Some(&target)
+                    })
+                })
+            {
+                p.reg_b = addr;
             }
         }
 
@@ -1268,15 +1297,23 @@ mod tests {
         }
     }
 
-    #[test]
-    fn seek_tag_finds_matching_partner() {
-        let code = [43u8, 255];
-        let (mut p, mut mem, mut fl) = make_program(&code, 100);
-        p.reg_a = 7;
-        let mut owners = vec![None; 65536];
-        owners[123] = Some(2);
-        let tags = [0, 0, 7];
-        let cfg = Config::default();
+    fn execute_search(
+        opcode: u8,
+        rh: u16,
+        reg_a: u16,
+        reg_b: u16,
+        radius: u16,
+        owners: &[Option<ProgramId>],
+        tags: &[u8],
+    ) -> (Program, u64) {
+        let (mut p, mut mem, mut fl) = make_program(&[opcode], 100);
+        p.rh = rh;
+        p.reg_a = reg_a;
+        p.reg_b = reg_b;
+        let cfg = Config {
+            interaction_radius: radius,
+            ..Config::default()
+        };
         let mut next_id = 100;
         let mut rng = StdRng::seed_from_u64(0);
         let mut events = Vec::new();
@@ -1285,8 +1322,8 @@ mod tests {
             &mut p,
             &mut mem,
             &mut fl,
-            &owners,
-            &tags,
+            owners,
+            tags,
             &cfg,
             &mut next_id,
             &mut rng,
@@ -1294,6 +1331,199 @@ mod tests {
             0,
             &mut ambient,
         );
+        (p, ambient)
+    }
+
+    #[test]
+    fn organism_searches_choose_nearest_target_in_either_direction() {
+        for opcode in [35, 43] {
+            let mut owners = vec![None; 65536];
+            owners[104] = Some(2);
+            owners[98] = Some(3);
+            let tags = [0, 0, 7, 7];
+            let (p, _) = execute_search(opcode, 100, 7, 500, 8, &owners, &tags);
+            assert_eq!(
+                p.reg_b, 98,
+                "opcode {opcode} must choose the nearer backward target"
+            );
+
+            owners[98] = None;
+            owners[95] = Some(3);
+            let (p, _) = execute_search(opcode, 100, 7, 500, 8, &owners, &tags);
+            assert_eq!(
+                p.reg_b, 104,
+                "opcode {opcode} must choose the nearer forward target"
+            );
+        }
+    }
+
+    #[test]
+    fn organism_search_ties_prefer_forward_direction() {
+        for opcode in [35, 43] {
+            let mut owners = vec![None; 65536];
+            owners[95] = Some(2);
+            owners[105] = Some(3);
+            let tags = [0, 0, 7, 7];
+            let (p, _) = execute_search(opcode, 100, 7, 500, 5, &owners, &tags);
+            assert_eq!(p.reg_b, 105, "opcode {opcode}");
+        }
+    }
+
+    #[test]
+    fn organism_search_radius_is_inclusive_and_stops_one_cell_beyond() {
+        for opcode in [35, 43] {
+            let mut owners = vec![None; 65536];
+            owners[90] = Some(2);
+            owners[111] = Some(3);
+            let tags = [0, 0, 7, 7];
+            let (p, _) = execute_search(opcode, 100, 7, 500, 10, &owners, &tags);
+            assert_eq!(
+                p.reg_b, 90,
+                "opcode {opcode} must reach the radius boundary"
+            );
+
+            owners[90] = None;
+            let (p, _) = execute_search(opcode, 100, 7, 500, 10, &owners, &tags);
+            assert_eq!(
+                p.reg_b, 500,
+                "opcode {opcode} must leave B unchanged beyond the radius"
+            );
+        }
+    }
+
+    #[test]
+    fn organism_searches_respect_the_antipodal_radius_boundary() {
+        for opcode in [35, 43] {
+            let mut owners = vec![None; 65536];
+            owners[32768] = Some(2);
+            let tags = [0, 0, 7];
+            let (outside, _) = execute_search(opcode, 0, 7, 500, 32767, &owners, &tags);
+            assert_eq!(outside.reg_b, 500, "opcode {opcode}");
+            let (at_boundary, _) = execute_search(opcode, 0, 7, 500, 32768, &owners, &tags);
+            assert_eq!(at_boundary.reg_b, 32768, "opcode {opcode}");
+            let (max_radius, _) = execute_search(opcode, 0, 7, 500, u16::MAX, &owners, &tags);
+            assert_eq!(max_radius.reg_b, 32768, "opcode {opcode}");
+        }
+    }
+
+    #[test]
+    fn organism_searches_wrap_symmetrically_across_address_zero() {
+        for opcode in [35, 43] {
+            let mut owners = vec![None; 65536];
+            owners[65534] = Some(2);
+            owners[5] = Some(3);
+            let tags = [0, 0, 7, 7];
+            let (p, _) = execute_search(opcode, 1, 7, 500, 4, &owners, &tags);
+            assert_eq!(p.reg_b, 65534, "opcode {opcode}");
+        }
+    }
+
+    #[test]
+    fn organism_search_radius_zero_can_match_the_read_head_only() {
+        for opcode in [35, 43] {
+            let mut owners = vec![None; 65536];
+            owners[100] = Some(2);
+            owners[101] = Some(3);
+            let tags = [0, 0, 7, 7];
+            let (p, _) = execute_search(opcode, 100, 7, 500, 0, &owners, &tags);
+            assert_eq!(p.reg_b, 100, "opcode {opcode}");
+        }
+    }
+
+    #[test]
+    fn organism_search_failure_preserves_registers_and_charges_only_base_cost() {
+        for opcode in [35, 43] {
+            let mut owners = vec![None; 65536];
+            owners[100] = Some(1);
+            if opcode == 43 {
+                owners[101] = Some(2);
+            }
+            let tags = [0, 7, 8];
+            let (p, ambient) = execute_search(opcode, 100, 7, 4321, 8, &owners, &tags);
+            assert_eq!(p.reg_a, 7, "opcode {opcode}");
+            assert_eq!(p.reg_b, 4321, "opcode {opcode}");
+            assert_eq!(p.rh, 100, "opcode {opcode}");
+            assert_eq!(p.energy, 99, "opcode {opcode}");
+            assert_eq!(ambient, 1, "opcode {opcode}");
+        }
+    }
+
+    fn run_killer_trace(target: u16, radius: u16) -> (Program, Memory, Vec<Event>, u64) {
+        let code = [35u8, 11, 12, 255, 9];
+        let (mut p, mut mem, mut fl) = make_program(&code, 100);
+        p.rh = 100;
+        mem.write(target, 1);
+        let mut owners = vec![None; 65536];
+        for owner in owners.iter_mut().take(code.len()) {
+            *owner = Some(p.id);
+        }
+        owners[target as usize] = Some(2);
+        let cfg = Config {
+            interaction_radius: radius,
+            mutation_rate: 0.0,
+            ..Config::default()
+        };
+        let mut next_id = 100;
+        let mut rng = StdRng::seed_from_u64(0);
+        let mut events = Vec::new();
+        let mut ambient = 0;
+        for tick in 0..code.len() as u64 {
+            assert!(matches!(
+                step(
+                    &mut p,
+                    &mut mem,
+                    &mut fl,
+                    &owners,
+                    &NO_TAGS,
+                    &cfg,
+                    &mut next_id,
+                    &mut rng,
+                    &mut events,
+                    tick,
+                    &mut ambient,
+                ),
+                StepResult::Continue
+            ));
+        }
+        (p, mem, events, ambient)
+    }
+
+    #[test]
+    fn nearby_carnivore_attack_still_reaches_its_victim() {
+        let target = 103;
+        let (attacker, memory, events, ambient) = run_killer_trace(target, 3);
+        assert_eq!(memory.read(target), 255);
+        assert_eq!(attacker.trace.foreign_seeks, 1);
+        assert_eq!(attacker.energy as u64 + ambient, 100);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            Event::ForeignWrite {
+                attacker_id: 1,
+                victim_id: 2,
+                address: 103,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn remote_victim_is_unchanged_over_the_same_carnivore_trace() {
+        let target = 104;
+        let (attacker, memory, events, ambient) = run_killer_trace(target, 3);
+        assert_eq!(memory.read(target), 1);
+        assert_eq!(attacker.trace.foreign_seeks, 1);
+        assert_eq!(attacker.energy as u64 + ambient, 100);
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, Event::ForeignWrite { victim_id: 2, .. })));
+    }
+
+    #[test]
+    fn seek_tag_finds_matching_partner() {
+        let mut owners = vec![None; 65536];
+        owners[123] = Some(2);
+        let tags = [0, 0, 7];
+        let (p, _) = execute_search(43, 0, 7, 500, 256, &owners, &tags);
         assert_eq!(p.reg_b, 123);
         assert_eq!(p.trace.tag_seeks, 1);
     }

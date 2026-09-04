@@ -38,7 +38,9 @@ Controls:
 - `r`: start again from the single ancestor
 - `q`: exit
 
-The simulation records the donor behind each consumed deposit. Counterfactual tests first choose an active pair of heritable identities with direct cross-organism resource-transfer evidence, falling back to abundant complementary metabolisms when no such exchange exists. The result reports how much each heritable identity's reproduction rate falls without the other. `Mutualism` requires both losses to reach 20% with at least two intact-world births each. That is evidence of ecological dependence under the current conditions, not proof that either program is semantically novel.
+The simulation records the donor behind each consumed deposit. Its behavior trace separately counts local foreign-organism and recognition-tag searches; the observer labels these as local foreign, local tag, or combined organism seekers. Both searches use the configured inclusive circular `interaction_radius`, check both directions, and cannot target remote organisms in one instruction.
+
+Counterfactual tests first choose an active pair of heritable identities with direct cross-organism resource-transfer evidence, falling back to abundant complementary metabolisms when no such exchange exists. The result reports how much each heritable identity's reproduction rate falls without the other. `Mutualism` requires both losses to reach 20% with at least two intact-world births each. That is evidence of ecological dependence under the current conditions, not proof that either program is semantically novel.
 
 For a reproducible headless run:
 

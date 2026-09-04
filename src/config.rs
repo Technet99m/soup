@@ -49,7 +49,8 @@ pub struct Config {
     pub child_locality_bias: f64,
     /// Chance per birth that the inherited recognition tag changes.
     pub tag_mutation_rate: f64,
-    /// Maximum circular distance scanned by resource and tag seeks.
+    /// Inclusive maximum circular distance scanned by resource and organism seeks.
+    /// Values above half the 65,536-cell ring are equivalent to 32,768.
     pub interaction_radius: u16,
     pub alloc_cost: u32,
     pub commit_cost: u32,

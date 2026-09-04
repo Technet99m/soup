@@ -89,6 +89,7 @@ struct GenomeSummary {
     harvested_a: u64,
     harvested_b: u64,
     given: u64,
+    foreign_seeks: u64,
     tag_seeks: u64,
     take_a_ops: u64,
     take_b_ops: u64,
@@ -401,6 +402,7 @@ impl App {
             summary.harvested_a += program.trace.harvested_a;
             summary.harvested_b += program.trace.harvested_b;
             summary.given += program.trace.given_a + program.trace.given_b;
+            summary.foreign_seeks += program.trace.foreign_seeks;
             summary.tag_seeks += program.trace.tag_seeks;
             summary.take_a_ops += program.trace.opcode_counts[31];
             summary.take_b_ops += program.trace.opcode_counts[37];
@@ -725,8 +727,12 @@ fn render_species(app: &App, frame: &mut Frame, area: Rect) {
 }
 
 fn phenotype(summary: &GenomeSummary) -> &'static str {
-    if summary.tag_seeks > 0 {
-        "tag seeker"
+    if summary.foreign_seeks > 0 && summary.tag_seeks > 0 {
+        "local organism seeker"
+    } else if summary.foreign_seeks > 0 {
+        "local foreign seeker"
+    } else if summary.tag_seeks > 0 {
+        "local tag seeker"
     } else if summary.given > 0 {
         "resource donor"
     } else if summary.take_a_ops + summary.take_b_ops < 8 {
@@ -884,7 +890,7 @@ fn render_inspector(app: &App, frame: &mut Frame, area: Rect) {
         Line::from(bytes),
         Line::from(ops),
         Line::from(format!(
-            " behavior  take A:{} B:{}  convert A:{} B:{} pairs:{}  excrete A:{} B:{}  tags:{}",
+            " behavior  take A:{} B:{}  convert A:{} B:{} pairs:{}  excrete A:{} B:{}  local seeks foreign:{} tag:{}",
             program.trace.harvested_a,
             program.trace.harvested_b,
             program.trace.converted_a,
@@ -892,6 +898,7 @@ fn render_inspector(app: &App, frame: &mut Frame, area: Rect) {
             program.trace.combined_ab,
             program.trace.given_a,
             program.trace.given_b,
+            program.trace.foreign_seeks,
             program.trace.tag_seeks,
         )),
     ];
@@ -1007,7 +1014,33 @@ fn main() -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{mnemonic, sort_genome_summaries, GenomeSummary};
+    use super::{mnemonic, phenotype, sort_genome_summaries, GenomeSummary};
+
+    #[test]
+    fn observer_distinguishes_local_organism_searches() {
+        assert_eq!(
+            phenotype(&GenomeSummary {
+                foreign_seeks: 1,
+                ..GenomeSummary::default()
+            }),
+            "local foreign seeker"
+        );
+        assert_eq!(
+            phenotype(&GenomeSummary {
+                tag_seeks: 1,
+                ..GenomeSummary::default()
+            }),
+            "local tag seeker"
+        );
+        assert_eq!(
+            phenotype(&GenomeSummary {
+                foreign_seeks: 1,
+                tag_seeks: 1,
+                ..GenomeSummary::default()
+            }),
+            "local organism seeker"
+        );
+    }
 
     #[test]
     fn summary_ties_are_independent_of_insertion_order() {

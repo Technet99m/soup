@@ -60,7 +60,7 @@ Every possible byte value must map to a valid instruction. Group them:
 | 32 | `SENSE_RESOURCE_A` | Load the A deposit at the read head into register B (saturating at 65535). |
 | 33 | `MEASURE_SELF` | Load this program's registered length into register A. |
 | 34 | `SET_READ_HEAD` | Set read head to register B |
-| 35 | `SEEK_FOREIGN_START` | Find memory owned by another live program |
+| 35 | `SEEK_FOREIGN_START` | Put the nearest foreign-owned address within `INTERACTION_RADIUS` in B; leave B unchanged if none is local. |
 | 36 | `EXCRETE_A_IMM` | Move stored A to a two-byte immediate address |
 | 37 | `TAKE_RESOURCE_B` | Move the B deposit at the read head into the internal B store; it does not become energy. |
 | 38 | `SENSE_RESOURCE_B` | Load B resource at the read head into register B |
@@ -68,7 +68,7 @@ Every possible byte value must map to a valid instruction. Group them:
 | 40 | `SEEK_RESOURCE_A` | Move the read head to the nearest A deposit |
 | 41 | `SEEK_RESOURCE_B` | Move the read head to the nearest B deposit |
 | 42 | `SET_TAG` | Set the organism's recognition tag from register A |
-| 43 | `SEEK_TAG` | Find another organism whose tag matches register A |
+| 43 | `SEEK_TAG` | Put the nearest foreign-owned address whose owner's tag matches A within `INTERACTION_RADIUS` in B; leave B unchanged if none is local. |
 | 44 | `CONVERT_A` | Convert stored A to energy, up to register B units; B=0 converts all. |
 | 45 | `CONVERT_B` | Convert stored B to energy, up to register B units; B=0 converts all. |
 | 46 | `COMBINE_AB` | Consume equal A and B amounts and yield two energy per pair; B=0 combines all possible pairs. |
@@ -80,6 +80,12 @@ The named bytes 0–46 and 255 are canonical and retain their historical semanti
 ---
 
 ## 3. Registers & Execution State
+
+### Local circular searches
+
+`SEEK_FOREIGN_START` and `SEEK_TAG` use the same deterministic neighborhood rule around RH. Circular distance is the shorter wrapped distance on the 65,536-cell ring, and `INTERACTION_RADIUS` is inclusive: a target exactly at the radius is reachable while one cell beyond is not. Distance zero is checked first, then increasing distances in both directions. At an exact-distance tie the forward address wins; at the 32,768-cell antipode forward and backward are the same address. Radii above 32,768 therefore cover the whole ring without visiting an address twice.
+
+Both instructions ignore the executing organism's own cells. `SEEK_TAG` additionally requires the foreign owner's current tag to equal the low byte of A. Success writes the matched address to B. Failure—including a lone organism, no foreign target, or no matching tag—leaves A, B, and RH unchanged. Each attempt costs the normal one energy unit regardless of radius or result; that unit returns to the ambient pool, so searching neither transfers nor creates energy.
 
 Each running program has:
 
