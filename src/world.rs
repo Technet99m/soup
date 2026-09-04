@@ -888,7 +888,21 @@ impl World {
     /// Reproduction is normalized by instructions executed, preventing the
     /// removed organisms' freed CPU share from masquerading as a benefit.
     pub fn counterfactual_symbiosis(&self, horizon: u64) -> Option<SymbiosisReport> {
-        let (heritable_identity_a, heritable_identity_b) = self.candidate_partner_pair()?;
+        let pair = self.candidate_partner_pair()?;
+        self.counterfactual_symbiosis_for(pair, horizon, |_| true)
+    }
+
+    /// Runs a specified candidate pair while allowing a worker to report progress
+    /// and cooperatively cancel between simulated ticks.
+    pub(crate) fn counterfactual_symbiosis_for<F>(
+        &self,
+        (heritable_identity_a, heritable_identity_b): (HeritableIdentity, HeritableIdentity),
+        horizon: u64,
+        mut continue_after: F,
+    ) -> Option<SymbiosisReport>
+    where
+        F: FnMut(u64) -> bool,
+    {
         let mut intact = self.clone();
         let mut without_b = self.clone();
         let mut without_a = self.clone();
@@ -901,10 +915,16 @@ impl World {
             without_b.measure_heritable_identities(heritable_identity_a, heritable_identity_b);
         let without_a_before =
             without_a.measure_heritable_identities(heritable_identity_a, heritable_identity_b);
-        for _ in 0..horizon {
+        if !continue_after(0) {
+            return None;
+        }
+        for completed in 1..=horizon {
             intact.tick();
             without_b.tick();
             without_a.tick();
+            if !continue_after(completed) {
+                return None;
+            }
         }
         let intact_after =
             intact.measure_heritable_identities(heritable_identity_a, heritable_identity_b);

@@ -1,5 +1,6 @@
 pub mod allocator;
 pub mod config;
+pub mod counterfactual;
 pub mod event_log;
 pub mod events;
 pub mod identity;
