@@ -17,9 +17,9 @@ pub fn tag_stats(world: &World) -> Vec<TagStats> {
         });
         entry.population += 1;
     }
-    for (ecotype, births) in &world.births_by_parent_ecotype {
-        let entry = tags.entry(ecotype.tag).or_insert(TagStats {
-            tag: ecotype.tag,
+    for (heritable_identity, births) in &world.births_by_parent_heritable_identity {
+        let entry = tags.entry(heritable_identity.tag).or_insert(TagStats {
+            tag: heritable_identity.tag,
             population: 0,
             births: 0,
         });
@@ -38,7 +38,7 @@ pub struct StatsSnapshot {
     /// Number of distinct live byte sequences.
     pub live_genomes: usize,
     /// Number of distinct live byte-and-tag evolutionary identities.
-    pub live_ecotypes: usize,
+    pub live_heritable_identities: usize,
     pub max_generation: u32,
     pub max_ancestor_distance: usize,
     pub total_births: u64,
@@ -64,7 +64,7 @@ impl StatsSnapshot {
         let memory_utilization = world.memory_utilization();
 
         let live_genomes = world.live_genomes();
-        let live_ecotypes = world.live_ecotypes();
+        let live_heritable_identities = world.live_heritable_identities();
         let max_ancestor_distance = world
             .programs
             .values()
@@ -98,7 +98,7 @@ impl StatsSnapshot {
             live_programs,
             memory_utilization,
             live_genomes,
-            live_ecotypes,
+            live_heritable_identities,
             max_generation: world.max_generation,
             max_ancestor_distance,
             total_births: world.total_births,
@@ -123,11 +123,11 @@ impl StatsSnapshot {
             .collect::<Vec<_>>()
             .join(",");
         println!(
-            "tick={:>12}  live={:>5}  genomes={:>4}  ecotypes={:>4}  gen={:>4}  drift={:>3}  births={:>7}  mutations={:>6}  mem={:>5.1}%  ambient={:>10}  A={:>9}  B={:>9}  tags(pop/births)={}",
+            "tick={:>12}  live={:>5}  genomes={:>4}  identities={:>4}  gen={:>4}  drift={:>3}  births={:>7}  mutations={:>6}  mem={:>5.1}%  ambient={:>10}  A={:>9}  B={:>9}  tags(pop/births)={}",
             self.tick,
             self.live_programs,
             self.live_genomes,
-            self.live_ecotypes,
+            self.live_heritable_identities,
             self.max_generation,
             self.max_ancestor_distance,
             self.total_births,
@@ -175,14 +175,17 @@ mod tests {
         let mut world = World::new(cfg);
         world.programs.get_mut(&0).unwrap().tag = 12;
         world.program_tags[0] = 12;
-        let ecotype = world.ecotype(&world.programs[&0]);
+        let heritable_identity = world.heritable_identity(&world.programs[&0]);
         let mut sibling = world.programs[&0].clone();
         sibling.id = 1;
         world.programs.insert(1, sibling);
-        world.births_by_parent_ecotype.insert(ecotype, 4);
         world
-            .births_by_parent_ecotype
-            .insert(crate::identity::Ecotype::new(ecotype.genome ^ 1, 12), 2);
+            .births_by_parent_heritable_identity
+            .insert(heritable_identity, 4);
+        world.births_by_parent_heritable_identity.insert(
+            crate::identity::HeritableIdentity::new(heritable_identity.genome ^ 1, 12),
+            2,
+        );
 
         let snapshot = StatsSnapshot::compute(&world);
 

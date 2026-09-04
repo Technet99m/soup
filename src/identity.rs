@@ -8,12 +8,12 @@ use serde::{Deserialize, Serialize};
 /// collapsing equal byte sequences that recognize different partners, while
 /// retaining the genome hash prevents equal tags from collapsing distinct code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct Ecotype {
+pub struct HeritableIdentity {
     pub genome: u64,
     pub tag: u8,
 }
 
-impl Ecotype {
+impl HeritableIdentity {
     pub const fn new(genome: u64, tag: u8) -> Self {
         Self { genome, tag }
     }

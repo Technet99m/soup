@@ -1,4 +1,4 @@
-use crate::{identity::Ecotype, program::ProgramId};
+use crate::{identity::HeritableIdentity, program::ProgramId};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -23,7 +23,7 @@ pub enum Event {
         energy: u32,
         generation: u32,
         /// The child's byte genome plus recognition tag at birth.
-        ecotype: Ecotype,
+        heritable_identity: HeritableIdentity,
     },
     Died {
         tick: u64,
@@ -55,7 +55,9 @@ pub enum Event {
     ResourceTransfer {
         tick: u64,
         donor_id: ProgramId,
+        donor_heritable_identity: HeritableIdentity,
         receiver_id: ProgramId,
+        receiver_heritable_identity: HeritableIdentity,
         resource: ResourceKind,
         amount: u32,
     },

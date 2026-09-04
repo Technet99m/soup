@@ -51,7 +51,7 @@ fn main() {
 
     println!(
         "{:>12}  {:>5}  {:>7}  {:>4}  {:>5}  {:>7}  {:>9}  {:>6}",
-        "tick", "live", "ecotypes", "gen", "drift", "births", "mutations", "mem%"
+        "tick", "live", "identities", "gen", "drift", "births", "mutations", "mem%"
     );
 
     loop {
@@ -87,17 +87,17 @@ fn main() {
             Some(report) => println!(
                 "Counterfactual {:?}: {:06x}/tag={:02x} dependence={:.1}% ({} intact births), {:06x}/tag={:02x} dependence={:.1}% ({} intact births), horizon={}",
                 report.verdict,
-                report.ecotype_a.genome & 0xffffff,
-                report.ecotype_a.tag,
+                report.heritable_identity_a.genome & 0xffffff,
+                report.heritable_identity_a.tag,
                 report.dependence_a * 100.0,
                 report.baseline_births_a,
-                report.ecotype_b.genome & 0xffffff,
-                report.ecotype_b.tag,
+                report.heritable_identity_b.genome & 0xffffff,
+                report.heritable_identity_b.tag,
                 report.dependence_b * 100.0,
                 report.baseline_births_b,
                 report.horizon,
             ),
-            None => println!("Counterfactual skipped: fewer than two live genomes."),
+            None => println!("Counterfactual skipped: fewer than two candidate heritable identities."),
         }
     }
 }

@@ -18,13 +18,13 @@ Run the live evolution observer:
 cargo run --release --bin viz
 ```
 
-Start at 100 ticks per frame and use `+` to accelerate. The genome view colors live ecotypes (byte sequence plus recognition tag). White flashes identify recent mutations and attacks. The resource view uses cyan for A, magenta for B, and yellow where both occur. The right-hand table describes observed metabolism and interaction behavior.
+Start at 100 ticks per frame and use `+` to accelerate. The genome view colors live heritable identities (byte sequence plus recognition tag). White flashes identify recent mutations and attacks. The resource view uses cyan for A, magenta for B, and yellow where both occur. The right-hand table describes observed metabolism and interaction behavior.
 
 ## Recognition identity
 
-An ecotype is the pair `(genome hash, recognition tag)`. The explicit tag component keeps identical byte sequences with different partner-recognition behavior separate, while the genome component keeps unrelated programs that happen to use the same tag separate. Children inherit their parent's tag on both `COMMIT` and `SPLIT`. `SET_TAG` changes the executing organism's tag during its lifetime, and `tag_mutation_rate` independently replaces an inherited tag at birth (a mutation always chooses a value different from the inherited one). Birth lineage events record the child's complete ecotype.
+`HeritableIdentity` is the raw pair `(genome hash, recognition tag)`. The explicit tag component keeps identical byte sequences with different partner-recognition behavior separate, while the genome component keeps unrelated programs that happen to use the same tag separate. “Ecotype” is reserved for a future persistent behavioral-viability concept rather than this raw key. Children inherit their parent's tag on both `COMMIT` and `SPLIT`. `SET_TAG` changes the executing organism's tag during its lifetime, and `tag_mutation_rate` independently replaces an inherited tag at birth (a mutation always chooses a value different from the inherited one). Birth lineage events record the child's complete heritable identity.
 
-Ecotype-keyed reproduction, resource-transfer, activity, and counterfactual-removal accounting therefore preserve tag-defined clades. The headless observer appends `tags(pop/births)` to each statistics line, and the TUI ecotype table shows each tag and its reproductive output; its title aggregates live frequency and births by tag.
+Heritable-identity-keyed reproduction, resource-transfer, activity, and counterfactual-removal accounting therefore preserve tag-defined clades. Each organism deposit snapshots the donor ID and heritable identity; exact per-origin quantities travel with both resource maps through merges, partial drains, decay, and opposing currents. Attribution therefore survives later donor tag/genome changes and death. The headless observer appends `tags(pop/births)` to each statistics line, and the TUI identity table shows each tag and its reproductive output; its title aggregates live frequency and births by tag.
 
 Controls:
 

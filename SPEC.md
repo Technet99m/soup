@@ -12,8 +12,8 @@ A digital life simulation where self-replicating bytecode programs evolve inside
 - Every cell is always a valid instruction (no "invalid" states)
 - Memory is **circular** — address arithmetic wraps around
 - Programs occupy contiguous slices: `[start, start + length)`
-- A separate **program registry** maps program IDs to `{ start, length, age, energy, metabolite_a, metabolite_b }`
-- Parallel **resource A** and **resource B** maps (`[u32; 65536]` each) hold deposits independently of instruction bytes. Each chemistry has distinct seek, sense, take, and give instructions.
+- A separate **program registry** maps program IDs to `{ start, length, age, energy, metabolite_a, metabolite_b, tag, lineage_id, parent_id, generation }`
+- Parallel **resource A** and **resource B** maps (`[u32; 65536]` each) hold deposits independently of instruction bytes. Each chemistry has distinct seek, sense, take, and give instructions. Parallel provenance maps retain exact quantities keyed by the donor ID and the donor's deposit-time `HeritableIdentity`; organism-independent source quantities are explicitly unattributed.
 - External A and B deposits come from fixed or moving periodic sources. Source positions are relative to a seed-derived environmental origin and never depend on the live population or simulation RNG state.
 - A moves forward and B moves backward during decay sweeps. Source movement and counter-currents produce changing local resource conditions while conserving the combined energy budget.
 
@@ -129,7 +129,9 @@ Substitution is applied at **write time** (when `WRITE` or `COPY` executes):
 - **0.5% chance per byte written** of flipping the written value to a random u8
 - Mutation rate is a **configurable global parameter**
 - At birth, independent configurable rates insert one byte, delete a 1–8 byte span, or duplicate a 1–8 byte span.
-- A child's inherited recognition tag can also mutate independently.
+- `COMMIT` and `SPLIT` copy the parent's current recognition tag to the child before birth mutation.
+- A child's inherited recognition tag can mutate independently at birth according to `TAG_MUTATION_RATE`; a triggered mutation always chooses a different tag.
+- `SET_TAG` changes only the executing organism's current tag. Existing deposits and emitted lineage events retain their earlier snapshots.
 
 ---
 
@@ -184,8 +186,9 @@ COMMIT               ; child size comes from A
 ## 9. Lineage Tracking
 
 - Each program has a `lineage_id` (UUID) and `parent_id`
-- On `COMMIT`/`SPLIT`: child inherits parent's lineage chain
+- On `COMMIT`/`SPLIT`: child inherits the parent's lineage chain and current recognition tag before independent birth mutations are applied.
 - Substitutions and structural genome edits are emitted as events
+- A `HeritableIdentity` is the raw `(genome hash, recognition tag)` pair used for lineage, activity, transfer, and counterfactual accounting. Raw genome counts remain tag-independent. “Ecotype” is reserved for the future persistent behavioral-viability concept.
 - This allows a **full evolutionary tree** to be reconstructed from logs
 
 ---
@@ -194,23 +197,27 @@ COMMIT               ; child size comes from A
 
 ### Required logs (append-only event stream):
 ```text
-TICK       { tick_number }
-BORN       { id, parent_id, start, length, energy }
-DIED       { id, cause: "energy" | "killed" | "evicted" }
+TICK       { tick }
+BORN       { tick, id, parent_id, lineage_id, parent_lineage_id, start, length, energy, generation, heritable_identity: { genome, tag } }
+DIED       { tick, id, cause: "energy" | "senescence" | "killed" | "evicted" }
 MUTATED    { tick, address, old_value, new_value }
-COMMITTED  { parent_id, child_id }
+STRUCTURAL_MUTATION { tick, id, parent_id, kind, index, old_length, new_length }
+TAG_CHANGED { tick, id, old_tag, new_tag }
+RESOURCE_TRANSFER { tick, donor_id, donor_heritable_identity, receiver_id, receiver_heritable_identity, resource, amount }
+METABOLIZED { tick, id, pathway, input_a, input_b, energy_yield }
+COMMITTED  { tick, parent_id, child_id }
 ```
 
 ### Live stats (emit every N ticks):
 ```text
 - Total live programs
 - Memory utilization %
-- Distinct live genomes, generation depth, and byte distance from each startup ancestor
+- Distinct raw live genomes, distinct live heritable identities, generation depth, and byte distance from each startup ancestor
 - Most common instruction distribution
 - Oldest living program age (in ticks)
 - Per-organism execution counts, A/B harvests, A/B gifts, and tag searches
 - Per-organism A/B stores plus A, B, and combined conversion totals
-- Donor provenance for resources consumed by a different genome
+- Exact deposit-time donor provenance for resources consumed by a different heritable identity, including after donor mutation or death
 - `METABOLIZED` events containing the pathway, A/B inputs, and energy yield
 - Counterfactual reproductive-rate change after removing either candidate partner
 ```

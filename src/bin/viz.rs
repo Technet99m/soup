@@ -17,7 +17,9 @@ use ratatui::{
     widgets::{Block, Borders, Cell, Paragraph, Row, Table},
     Frame, Terminal,
 };
-use soup::{config::Config, events::Event, identity::Ecotype, stats::tag_stats, world::World};
+use soup::{
+    config::Config, events::Event, identity::HeritableIdentity, stats::tag_stats, world::World,
+};
 
 const GENOME_COLORS: [Color; 12] = [
     Color::Rgb(76, 201, 240),
@@ -52,7 +54,7 @@ impl DisplayMode {
 
     fn label(self) -> &'static str {
         match self {
-            Self::Genomes => "live ecotypes",
+            Self::Genomes => "live heritable identities",
             Self::Ancestors => "ancestry",
             Self::Energy => "energy current",
         }
@@ -75,7 +77,7 @@ struct Activity {
     kind: ActivityKind,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct GenomeSummary {
     hash: u64,
     tag: u8,
@@ -99,8 +101,8 @@ struct App {
     steps_per_frame: u64,
     selected_id: Option<u32>,
     display_mode: DisplayMode,
-    known_genomes: HashSet<Ecotype>,
-    known_phenotypes: HashSet<(Ecotype, &'static str)>,
+    known_genomes: HashSet<HeritableIdentity>,
+    known_phenotypes: HashSet<(HeritableIdentity, &'static str)>,
     activity: VecDeque<Activity>,
     live_history: VecDeque<u64>,
     genome_history: VecDeque<u64>,
@@ -114,7 +116,7 @@ impl App {
         let known_genomes = world
             .programs
             .values()
-            .map(|program| world.ecotype(program))
+            .map(|program| world.heritable_identity(program))
             .collect();
         let mut app = Self {
             world,
@@ -211,6 +213,7 @@ impl App {
                     receiver_id,
                     resource,
                     amount,
+                    ..
                 } => self.push_activity(
                     tick,
                     format!("resource {resource:?}  #{donor_id} -> #{receiver_id}  {amount} units"),
@@ -240,15 +243,15 @@ impl App {
                     let Some(program) = self.world.programs.get(&id) else {
                         continue;
                     };
-                    let ecotype = self.world.ecotype(program);
+                    let heritable_identity = self.world.heritable_identity(program);
                     let drift = self.world.ancestor_distance(program);
-                    if self.known_genomes.insert(ecotype) {
+                    if self.known_genomes.insert(heritable_identity) {
                         self.push_activity(
                             tick,
                             format!(
-                                "new ecotype {:06x}/{:02x}  gen {generation}  drift {drift}",
-                                ecotype.genome & 0xffffff,
-                                ecotype.tag,
+                                "new identity {:06x}/{:02x}  gen {generation}  drift {drift}",
+                                heritable_identity.genome & 0xffffff,
+                                heritable_identity.tag,
                             ),
                             ActivityKind::Novel,
                         );
@@ -301,7 +304,7 @@ impl App {
     fn sample(&mut self) {
         self.live_history.push_back(self.world.live_count() as u64);
         self.genome_history
-            .push_back(self.world.live_ecotypes() as u64);
+            .push_back(self.world.live_heritable_identities() as u64);
         while self.live_history.len() > 90 {
             self.live_history.pop_front();
             self.genome_history.pop_front();
@@ -309,17 +312,22 @@ impl App {
         let observed: Vec<_> = self
             .species()
             .into_iter()
-            .map(|summary| (Ecotype::new(summary.hash, summary.tag), phenotype(&summary)))
+            .map(|summary| {
+                (
+                    HeritableIdentity::new(summary.hash, summary.tag),
+                    phenotype(&summary),
+                )
+            })
             .filter(|(_, behavior)| *behavior != "unexpressed")
             .collect();
-        for (ecotype, behavior) in observed {
-            if self.known_phenotypes.insert((ecotype, behavior)) {
+        for (heritable_identity, behavior) in observed {
+            if self.known_phenotypes.insert((heritable_identity, behavior)) {
                 self.push_activity(
                     self.world.tick,
                     format!(
                         "behavior {:06x}/{:02x}  {behavior}",
-                        ecotype.genome & 0xffffff,
-                        ecotype.tag
+                        heritable_identity.genome & 0xffffff,
+                        heritable_identity.tag
                     ),
                     ActivityKind::Relationship,
                 );
@@ -370,20 +378,22 @@ impl App {
     }
 
     fn species(&self) -> Vec<GenomeSummary> {
-        let mut by_ecotype: HashMap<Ecotype, GenomeSummary> = HashMap::new();
+        let mut by_heritable_identity: HashMap<HeritableIdentity, GenomeSummary> = HashMap::new();
         for program in self.world.programs.values() {
-            let ecotype = self.world.ecotype(program);
-            let summary = by_ecotype.entry(ecotype).or_insert_with(|| GenomeSummary {
-                hash: ecotype.genome,
-                tag: ecotype.tag,
-                births: self
-                    .world
-                    .births_by_parent_ecotype
-                    .get(&ecotype)
-                    .copied()
-                    .unwrap_or(0),
-                ..GenomeSummary::default()
-            });
+            let heritable_identity = self.world.heritable_identity(program);
+            let summary = by_heritable_identity
+                .entry(heritable_identity)
+                .or_insert_with(|| GenomeSummary {
+                    hash: heritable_identity.genome,
+                    tag: heritable_identity.tag,
+                    births: self
+                        .world
+                        .births_by_parent_heritable_identity
+                        .get(&heritable_identity)
+                        .copied()
+                        .unwrap_or(0),
+                    ..GenomeSummary::default()
+                });
             summary.population += 1;
             summary.max_generation = summary.max_generation.max(program.generation);
             summary.max_drift = summary.max_drift.max(self.world.ancestor_distance(program));
@@ -395,13 +405,8 @@ impl App {
             summary.take_a_ops += program.trace.opcode_counts[31];
             summary.take_b_ops += program.trace.opcode_counts[37];
         }
-        let mut species: Vec<_> = by_ecotype.into_values().collect();
-        species.sort_by_key(|summary| {
-            (
-                std::cmp::Reverse(summary.population),
-                std::cmp::Reverse(summary.max_generation),
-            )
-        });
+        let mut species: Vec<_> = by_heritable_identity.into_values().collect();
+        sort_genome_summaries(&mut species);
         species
     }
 
@@ -410,7 +415,7 @@ impl App {
         let Some(report) = self.world.counterfactual_symbiosis(horizon) else {
             self.push_activity(
                 self.world.tick,
-                "symbiosis test needs at least two live genomes".into(),
+                "counterfactual needs two candidate heritable identities".into(),
                 ActivityKind::Relationship,
             );
             return;
@@ -420,11 +425,11 @@ impl App {
             format!(
                 "counterfactual {:?}: {:06x}/{:02x} loses {:.0}%, {:06x}/{:02x} loses {:.0}% (births {} / {})",
                 report.verdict,
-                report.ecotype_a.genome & 0xffffff,
-                report.ecotype_a.tag,
+                report.heritable_identity_a.genome & 0xffffff,
+                report.heritable_identity_a.tag,
                 report.dependence_a * 100.0,
-                report.ecotype_b.genome & 0xffffff,
-                report.ecotype_b.tag,
+                report.heritable_identity_b.genome & 0xffffff,
+                report.heritable_identity_b.tag,
                 report.dependence_b * 100.0,
                 report.baseline_births_a,
                 report.baseline_births_b,
@@ -434,12 +439,23 @@ impl App {
     }
 }
 
+fn sort_genome_summaries(summaries: &mut [GenomeSummary]) {
+    summaries.sort_by_key(|summary| {
+        (
+            std::cmp::Reverse(summary.population),
+            std::cmp::Reverse(summary.max_generation),
+            summary.hash,
+            summary.tag,
+        )
+    });
+}
+
 fn genome_color(hash: u64) -> Color {
     GENOME_COLORS[(hash as usize) % GENOME_COLORS.len()]
 }
 
-fn ecotype_color(ecotype: Ecotype) -> Color {
-    genome_color(ecotype.genome ^ ((ecotype.tag as u64) << 56))
+fn heritable_identity_color(heritable_identity: HeritableIdentity) -> Color {
+    genome_color(heritable_identity.genome ^ ((heritable_identity.tag as u64) << 56))
 }
 
 fn ancestor_color(template_id: Option<u8>) -> Color {
@@ -531,12 +547,12 @@ fn render_header(app: &App, frame: &mut Frame, area: Rect) {
             ),
             Span::raw("alive   "),
             Span::styled(
-                format!("{:>4} ", world.live_ecotypes()),
+                format!("{:>4} ", world.live_heritable_identities()),
                 Style::default()
                     .fg(Color::Rgb(247, 37, 133))
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::raw("ecotypes  "),
+            Span::raw("identities  "),
             Span::styled(
                 format!("G{:>3} ", world.max_generation),
                 Style::default()
@@ -639,7 +655,9 @@ fn render_memory(app: &App, frame: &mut Frame, area: Rect) {
                     let owner = (start..end).find_map(|address| app.world.addr_to_owner[address]);
                     let color = owner
                         .and_then(|id| app.world.programs.get(&id))
-                        .map(|program| ecotype_color(app.world.ecotype(program)))
+                        .map(|program| {
+                            heritable_identity_color(app.world.heritable_identity(program))
+                        })
                         .unwrap_or(Color::Rgb(32, 36, 46));
                     let color = if recent_mutation { Color::White } else { color };
                     (if owner.is_some() { "█" } else { "·" }, color)
@@ -671,7 +689,7 @@ fn render_species(app: &App, frame: &mut Frame, area: Rect) {
         .iter()
         .take(area.height.saturating_sub(3) as usize)
         .map(|summary| {
-            let color = ecotype_color(Ecotype::new(summary.hash, summary.tag));
+            let color = heritable_identity_color(HeritableIdentity::new(summary.hash, summary.tag));
             Row::new(vec![
                 Cell::from("●").style(Style::default().fg(color)),
                 Cell::from(format!("{:06x}", summary.hash & 0xffffff))
@@ -697,7 +715,9 @@ fn render_species(app: &App, frame: &mut Frame, area: Rect) {
         )
         .block(
             Block::default()
-                .title(format!(" ECOTYPES | TAG pop/births {tag_report} "))
+                .title(format!(
+                    " HERITABLE IDENTITIES | TAG pop/births {tag_report} "
+                ))
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::Rgb(61, 68, 81))),
         );
@@ -804,8 +824,8 @@ fn render_inspector(app: &App, frame: &mut Frame, area: Rect) {
         return;
     };
     let genome = app.world.memory.read_slice(program.start, program.length);
-    let ecotype = app.world.ecotype(program);
-    let hash = ecotype.genome;
+    let heritable_identity = app.world.heritable_identity(program);
+    let hash = heritable_identity.genome;
     let drift = app.world.ancestor_distance(program);
     let parent = program
         .parent_id
@@ -821,7 +841,7 @@ fn render_inspector(app: &App, frame: &mut Frame, area: Rect) {
                 .bg(Color::Rgb(255, 190, 11))
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(ecotype_color(ecotype))
+            Style::default().fg(heritable_identity_color(heritable_identity))
         };
         bytes.push(Span::styled(format!("{byte:02x} "), style));
         ops.push(Span::styled(format!("{} ", mnemonic(*byte)), style));
@@ -832,13 +852,13 @@ fn render_inspector(app: &App, frame: &mut Frame, area: Rect) {
                 format!(" #{} ", program.id),
                 Style::default()
                     .fg(Color::Black)
-                    .bg(ecotype_color(ecotype))
+                    .bg(heritable_identity_color(heritable_identity))
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(format!(
-                "  ecotype {:06x}/{:02x}   generation {}   parent {}   ancestor {}   drift {} byte{}",
+                "  identity {:06x}/{:02x}   generation {}   parent {}   ancestor {}   drift {} byte{}",
                 hash & 0xffffff,
-                ecotype.tag,
+                heritable_identity.tag,
                 program.generation,
                 parent,
                 short_origin(&app.world, program.template_id),
@@ -878,7 +898,7 @@ fn render_inspector(app: &App, frame: &mut Frame, area: Rect) {
     let block = Block::default()
         .title(" SELECTED ORGANISM ")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(ecotype_color(ecotype)));
+        .border_style(Style::default().fg(heritable_identity_color(heritable_identity)));
     frame.render_widget(Paragraph::new(lines).block(block), area);
 }
 
@@ -987,7 +1007,52 @@ fn main() -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::mnemonic;
+    use super::{mnemonic, sort_genome_summaries, GenomeSummary};
+
+    #[test]
+    fn summary_ties_are_independent_of_insertion_order() {
+        let summaries = vec![
+            GenomeSummary {
+                hash: 30,
+                tag: 2,
+                population: 4,
+                max_generation: 7,
+                births: 3,
+                ..GenomeSummary::default()
+            },
+            GenomeSummary {
+                hash: 20,
+                tag: 9,
+                population: 4,
+                max_generation: 7,
+                births: 3,
+                ..GenomeSummary::default()
+            },
+            GenomeSummary {
+                hash: 20,
+                tag: 1,
+                population: 4,
+                max_generation: 7,
+                births: 3,
+                ..GenomeSummary::default()
+            },
+        ];
+        let mut forward = summaries.clone();
+        let mut reverse = summaries;
+        reverse.reverse();
+
+        sort_genome_summaries(&mut forward);
+        sort_genome_summaries(&mut reverse);
+
+        let keys = |items: &[GenomeSummary]| {
+            items
+                .iter()
+                .map(|summary| (summary.hash, summary.tag))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(keys(&forward), keys(&reverse));
+        assert_eq!(keys(&forward), vec![(20, 1), (20, 9), (30, 2)]);
+    }
 
     #[test]
     fn metabolic_opcodes_have_explicit_display_mnemonics() {
