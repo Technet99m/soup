@@ -58,6 +58,12 @@ pub struct Config {
     pub max_program_age: u64,
     pub loop_max_depth: usize,
     pub ticks_per_stat_log: u64,
+    /// Minimum accumulated observation time before reporting an ecotype.
+    pub ecotype_min_persistence_ticks: u64,
+    /// Minimum births by behaviorally equivalent organisms.
+    pub ecotype_min_reproductive_output: u64,
+    /// Stable parent-to-descendant links required (2 requires a grandchild).
+    pub ecotype_min_descendant_generations: u32,
     pub rng_seed: u64,
     /// Amount subtracted from each energy deposit per decay event. Default: 1.
     pub energy_decay_rate: u32,
@@ -102,6 +108,9 @@ impl Default for Config {
             max_program_age: 20_000,
             loop_max_depth: 8,
             ticks_per_stat_log: 10_000,
+            ecotype_min_persistence_ticks: 10_000,
+            ecotype_min_reproductive_output: 2,
+            ecotype_min_descendant_generations: 2,
             rng_seed: 42,
             energy_decay_rate: 1,
             energy_decay_interval: 100,
@@ -167,6 +176,9 @@ impl Config {
                 c.max_program_age = file_cfg.max_program_age;
                 c.loop_max_depth = file_cfg.loop_max_depth;
                 c.ticks_per_stat_log = file_cfg.ticks_per_stat_log;
+                c.ecotype_min_persistence_ticks = file_cfg.ecotype_min_persistence_ticks;
+                c.ecotype_min_reproductive_output = file_cfg.ecotype_min_reproductive_output;
+                c.ecotype_min_descendant_generations = file_cfg.ecotype_min_descendant_generations;
                 c.rng_seed = file_cfg.rng_seed;
                 c.energy_decay_rate = file_cfg.energy_decay_rate;
                 c.energy_decay_interval = file_cfg.energy_decay_interval;
@@ -203,6 +215,18 @@ impl Config {
         parse_env!(max_program_age, "MAX_PROGRAM_AGE");
         parse_env!(loop_max_depth, "LOOP_MAX_DEPTH");
         parse_env!(ticks_per_stat_log, "TICKS_PER_STAT_LOG");
+        parse_env!(
+            ecotype_min_persistence_ticks,
+            "ECOTYPE_MIN_PERSISTENCE_TICKS"
+        );
+        parse_env!(
+            ecotype_min_reproductive_output,
+            "ECOTYPE_MIN_REPRODUCTIVE_OUTPUT"
+        );
+        parse_env!(
+            ecotype_min_descendant_generations,
+            "ECOTYPE_MIN_DESCENDANT_GENERATIONS"
+        );
         parse_env!(rng_seed, "RNG_SEED");
         parse_env!(energy_decay_rate, "ENERGY_DECAY_RATE");
         parse_env!(energy_decay_interval, "ENERGY_DECAY_INTERVAL");

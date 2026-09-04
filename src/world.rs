@@ -1,16 +1,29 @@
 use crate::{
     allocator::FreeList,
     config::Config,
+    ecotype::{
+        viable_ecotypes, BehaviorObservation, ObservationTermination, ViabilityRule, ViableEcotype,
+    },
     events::{DeathCause, Event, ResourceKind, StructuralMutationKind},
-    identity::HeritableIdentity,
+    identity::{EcotypeEquivalence, HeritableIdentity},
     memory::Memory,
     mutation,
+    opcode::Opcode,
     program::{Program, ProgramId},
     template,
     vm::{self, StepResult},
 };
 use rand::{rngs::StdRng, Rng, SeedableRng};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
+
+#[derive(Debug, Clone)]
+struct ActiveBehaviorSegment {
+    identity: HeritableIdentity,
+    start_tick: u64,
+    began_at_birth: bool,
+    reproductive_output: u64,
+    offspring_ids: Vec<ProgramId>,
+}
 
 #[derive(Debug, Clone)]
 pub struct SymbiosisReport {
@@ -72,6 +85,11 @@ pub struct World {
     pub last_birth_by_heritable_identity: HashMap<HeritableIdentity, u64>,
     /// Most recently observed heritable identity for every program ID, retained after death.
     pub heritable_identity_by_id: Vec<HeritableIdentity>,
+    /// Completed execution segments, retained permanently after identity changes and death.
+    pub behavior_archive: Vec<BehaviorObservation>,
+    active_behavior_segments: HashMap<ProgramId, ActiveBehaviorSegment>,
+    announced_ecotypes: std::collections::HashSet<EcotypeEquivalence>,
+    viable_ecotypes_cache: BTreeMap<EcotypeEquivalence, ViableEcotype>,
     /// Cross-identity resources consumed, keyed by (donor, receiver).
     pub interactions: HashMap<(HeritableIdentity, HeritableIdentity), u64>,
     /// Executed instructions attributed to the heritable identity present before each step.
@@ -213,6 +231,21 @@ impl World {
             heritable_identity_by_id[program.id as usize] =
                 HeritableIdentity::new(genome_hash_in_memory(&memory, program), program.tag);
         }
+        let active_behavior_segments = programs
+            .values()
+            .map(|program| {
+                (
+                    program.id,
+                    ActiveBehaviorSegment {
+                        identity: heritable_identity_by_id[program.id as usize],
+                        start_tick: 0,
+                        began_at_birth: true,
+                        reproductive_output: 0,
+                        offspring_ids: Vec::new(),
+                    },
+                )
+            })
+            .collect();
 
         World {
             memory,
@@ -231,6 +264,10 @@ impl World {
             births_by_parent_heritable_identity: HashMap::new(),
             last_birth_by_heritable_identity: HashMap::new(),
             heritable_identity_by_id,
+            behavior_archive: Vec::new(),
+            active_behavior_segments,
+            announced_ecotypes: std::collections::HashSet::new(),
+            viable_ecotypes_cache: BTreeMap::new(),
             interactions: HashMap::new(),
             steps_by_heritable_identity: HashMap::new(),
             total_births: 0,
@@ -278,7 +315,10 @@ impl World {
         // Pop the next program ID (skipping dead ones lazily).
         let id = loop {
             match self.queue.pop_front() {
-                None => return events, // no live programs
+                None => {
+                    self.refresh_viable_ecotypes(&mut events);
+                    return events;
+                } // no live programs
                 Some(id) if self.programs.contains_key(&id) => break id,
                 Some(_) => {} // dead, skip
             }
@@ -304,6 +344,7 @@ impl World {
             .get(&id)
             .map(|program| self.heritable_identity(program))
             .unwrap_or(HeritableIdentity::new(0, 0));
+        self.segment_identity_change(id, executing_heritable_identity);
         if let Some(heritable_identity) = self.heritable_identity_by_id.get_mut(id as usize) {
             *heritable_identity = executing_heritable_identity;
         }
@@ -311,6 +352,14 @@ impl World {
             .steps_by_heritable_identity
             .entry(executing_heritable_identity)
             .or_default() += 1;
+        let write_victim = self.programs.get(&id).and_then(|program| {
+            matches!(
+                Opcode::from(self.memory.read(program.ip)),
+                Opcode::Write | Opcode::Copy
+            )
+            .then(|| self.addr_to_owner[program.wh as usize])
+            .flatten()
+        });
         let result = {
             let p = self.programs.get_mut(&id).unwrap();
             vm::step(
@@ -327,14 +376,28 @@ impl World {
                 &mut self.ambient_pool,
             )
         };
-        if let Some(program) = self.programs.get(&id) {
+        let current_heritable_identity = self.programs.get(&id).map(|program| {
             if let Some(tag) = self.program_tags.get_mut(id as usize) {
                 *tag = program.tag;
             }
-            let current_heritable_identity =
-                HeritableIdentity::new(genome_hash_in_memory(&self.memory, program), program.tag);
+            HeritableIdentity::new(genome_hash_in_memory(&self.memory, program), program.tag)
+        });
+        if let Some(current_heritable_identity) = current_heritable_identity {
             if let Some(heritable_identity) = self.heritable_identity_by_id.get_mut(id as usize) {
                 *heritable_identity = current_heritable_identity;
+            }
+            self.segment_identity_change(id, current_heritable_identity);
+        }
+        if let Some(victim_id) = write_victim.filter(|victim_id| *victim_id != id) {
+            let victim_identity = self.programs.get(&victim_id).map(|program| {
+                HeritableIdentity::new(genome_hash_in_memory(&self.memory, program), program.tag)
+            });
+            if let Some(victim_identity) = victim_identity {
+                if let Some(historical) = self.heritable_identity_by_id.get_mut(victim_id as usize)
+                {
+                    *historical = victim_identity;
+                }
+                self.segment_identity_change(victim_id, victim_identity);
             }
         }
 
@@ -343,7 +406,8 @@ impl World {
                 let senescent = self.config.max_program_age > 0
                     && self.programs[&id].age >= self.config.max_program_age;
                 if senescent {
-                    if let Some(p) = self.programs.remove(&id) {
+                    if let Some(mut p) = self.programs.remove(&id) {
+                        self.finish_behavior_segment(&mut p, ObservationTermination::Death);
                         if let Some((start, length)) = p.pending_allocation {
                             self.free_list.free(start, length);
                         }
@@ -365,7 +429,8 @@ impl World {
             }
             StepResult::Halted => {
                 // Program executed HALT — return remaining energy to ambient, free memory.
-                if let Some(p) = self.programs.remove(&id) {
+                if let Some(mut p) = self.programs.remove(&id) {
+                    self.finish_behavior_segment(&mut p, ObservationTermination::Death);
                     if let Some((start, length)) = p.pending_allocation {
                         self.free_list.free(start, length);
                     }
@@ -384,7 +449,8 @@ impl World {
             }
             StepResult::OutOfEnergy => {
                 // Energy is 0 (all burned to ambient via step()); nothing to return.
-                if let Some(p) = self.programs.remove(&id) {
+                if let Some(mut p) = self.programs.remove(&id) {
+                    self.finish_behavior_segment(&mut p, ObservationTermination::Death);
                     if let Some((start, length)) = p.pending_allocation {
                         self.free_list.free(start, length);
                     }
@@ -413,6 +479,10 @@ impl World {
                     .or_default() += 1;
                 self.last_birth_by_heritable_identity
                     .insert(parent_heritable_identity, self.tick);
+                if let Some(segment) = self.active_behavior_segments.get_mut(&id) {
+                    segment.reproductive_output += 1;
+                    segment.offspring_ids.push(child.id);
+                }
                 let parent_start = self.programs[&id].start;
                 self.apply_birth_mutations(&mut child, parent_start, &mut events);
                 let child_heritable_identity = self.heritable_identity(&child);
@@ -443,6 +513,16 @@ impl World {
                         .resize(child_id as usize + 1, HeritableIdentity::new(0, 0));
                 }
                 self.heritable_identity_by_id[child_id as usize] = child_heritable_identity;
+                self.active_behavior_segments.insert(
+                    child_id,
+                    ActiveBehaviorSegment {
+                        identity: child_heritable_identity,
+                        start_tick: self.tick,
+                        began_at_birth: true,
+                        reproductive_output: 0,
+                        offspring_ids: Vec::new(),
+                    },
+                );
                 for offset in 0..child.length as usize {
                     self.addr_to_owner[(child.start as usize + offset) % 65536] = Some(child_id);
                 }
@@ -479,7 +559,144 @@ impl World {
             }
         }
 
+        let viability_checkpoint = self
+            .tick
+            .is_multiple_of(self.config.ecotype_min_persistence_ticks.clamp(1, 10_000));
+        if viability_checkpoint {
+            self.refresh_viable_ecotypes(&mut events);
+        }
+
         events
+    }
+
+    fn refresh_viable_ecotypes(&mut self, events: &mut Vec<Event>) {
+        let evaluated = viable_ecotypes(
+            &self.behavior_observations(),
+            self.tick,
+            self.viability_rule(),
+        );
+        for (&equivalence, report) in &evaluated {
+            if self.announced_ecotypes.insert(equivalence) {
+                events.push(Event::NewProgram {
+                    tick: self.tick,
+                    ecotype_identity: report.identity,
+                    equivalent_raw_genomes: report.equivalent_raw_genomes,
+                    persistence_ticks: report.persistence_ticks,
+                    reproductive_output: report.reproductive_output,
+                    descendant_generations: report.descendant_generations,
+                });
+            }
+        }
+        self.viable_ecotypes_cache = evaluated;
+    }
+
+    fn segment_identity_change(&mut self, id: ProgramId, identity: HeritableIdentity) {
+        let Some(active) = self.active_behavior_segments.get(&id) else {
+            self.active_behavior_segments.insert(
+                id,
+                ActiveBehaviorSegment {
+                    identity,
+                    start_tick: self.tick,
+                    began_at_birth: false,
+                    reproductive_output: 0,
+                    offspring_ids: Vec::new(),
+                },
+            );
+            return;
+        };
+        if active.identity == identity {
+            return;
+        }
+        let Some(mut active) = self.active_behavior_segments.remove(&id) else {
+            return;
+        };
+        let Some(program) = self.programs.get_mut(&id) else {
+            return;
+        };
+        self.behavior_archive.push(BehaviorObservation {
+            program_id: id,
+            parent_id: program.parent_id,
+            generation: program.generation,
+            began_at_birth: active.began_at_birth,
+            identity: active.identity,
+            behavior: std::mem::take(&mut program.trace),
+            start_tick: active.start_tick,
+            end_tick: Some(self.tick),
+            reproductive_output: active.reproductive_output,
+            offspring_ids: std::mem::take(&mut active.offspring_ids),
+            termination: ObservationTermination::IdentityChanged,
+        });
+        self.active_behavior_segments.insert(
+            id,
+            ActiveBehaviorSegment {
+                identity,
+                start_tick: self.tick,
+                began_at_birth: false,
+                reproductive_output: 0,
+                offspring_ids: Vec::new(),
+            },
+        );
+    }
+
+    fn finish_behavior_segment(
+        &mut self,
+        program: &mut Program,
+        termination: ObservationTermination,
+    ) {
+        let Some(mut active) = self.active_behavior_segments.remove(&program.id) else {
+            return;
+        };
+        self.behavior_archive.push(BehaviorObservation {
+            program_id: program.id,
+            parent_id: program.parent_id,
+            generation: program.generation,
+            began_at_birth: active.began_at_birth,
+            identity: active.identity,
+            behavior: std::mem::take(&mut program.trace),
+            start_tick: active.start_tick,
+            end_tick: Some(self.tick),
+            reproductive_output: active.reproductive_output,
+            offspring_ids: std::mem::take(&mut active.offspring_ids),
+            termination,
+        });
+    }
+
+    /// Completed archive plus snapshots of every currently active segment.
+    pub fn behavior_observations(&self) -> Vec<BehaviorObservation> {
+        let mut observations = self.behavior_archive.clone();
+        observations.extend(self.programs.values().filter_map(|program| {
+            let active = self.active_behavior_segments.get(&program.id)?;
+            Some(BehaviorObservation {
+                program_id: program.id,
+                parent_id: program.parent_id,
+                generation: program.generation,
+                began_at_birth: active.began_at_birth,
+                identity: active.identity,
+                behavior: program.trace.clone(),
+                start_tick: active.start_tick,
+                end_tick: None,
+                reproductive_output: active.reproductive_output,
+                offspring_ids: active.offspring_ids.clone(),
+                termination: ObservationTermination::Live,
+            })
+        }));
+        observations
+    }
+
+    pub fn viability_rule(&self) -> ViabilityRule {
+        ViabilityRule {
+            min_persistence_ticks: self.config.ecotype_min_persistence_ticks,
+            min_reproductive_output: self.config.ecotype_min_reproductive_output,
+            min_descendant_generations: self.config.ecotype_min_descendant_generations,
+        }
+    }
+
+    pub fn viable_ecotypes(&self) -> &BTreeMap<EcotypeEquivalence, ViableEcotype> {
+        &self.viable_ecotypes_cache
+    }
+
+    pub fn viable_ecotype_count(&self) -> usize {
+        self.viable_ecotypes_cache.len()
     }
 
     fn record_resource_transfer(
@@ -1014,7 +1231,8 @@ impl World {
             .map(|program| program.id)
             .collect();
         for id in ids {
-            if let Some(program) = self.programs.remove(&id) {
+            if let Some(mut program) = self.programs.remove(&id) {
+                self.finish_behavior_segment(&mut program, ObservationTermination::Removed);
                 if let Some((start, length)) = program.pending_allocation {
                     self.free_list.free(start, length);
                 }
@@ -1094,6 +1312,22 @@ mod tests {
         }
         world.program_tags[id as usize] = tag;
         let heritable_identity = world.heritable_identity(&program);
+        if world.heritable_identity_by_id.len() <= id as usize {
+            world
+                .heritable_identity_by_id
+                .resize(id as usize + 1, HeritableIdentity::new(0, 0));
+        }
+        world.heritable_identity_by_id[id as usize] = heritable_identity;
+        world.active_behavior_segments.insert(
+            id,
+            ActiveBehaviorSegment {
+                identity: heritable_identity,
+                start_tick: world.tick,
+                began_at_birth: true,
+                reproductive_output: 0,
+                offspring_ids: Vec::new(),
+            },
+        );
         world.programs.insert(id, program);
         heritable_identity
     }
@@ -1400,6 +1634,59 @@ mod tests {
     }
 
     #[test]
+    fn ecotype_observation_thresholds_do_not_affect_simulation_state() {
+        let mut strict = seed_config();
+        strict.ecotype_min_persistence_ticks = 10_000;
+        strict.ecotype_min_reproductive_output = 10;
+        strict.ecotype_min_descendant_generations = 4;
+        let mut permissive = strict.clone();
+        permissive.ecotype_min_persistence_ticks = 1;
+        permissive.ecotype_min_reproductive_output = 0;
+        permissive.ecotype_min_descendant_generations = 0;
+        let mut left = World::new(strict);
+        let mut right = World::new(permissive);
+
+        left.run(5_000);
+        right.run(5_000);
+
+        let project = |world: &World| {
+            let mut programs: Vec<_> = world
+                .programs
+                .values()
+                .map(|program| {
+                    (
+                        program.id,
+                        program.start,
+                        program.length,
+                        program.ip,
+                        program.reg_a,
+                        program.reg_b,
+                        program.rh,
+                        program.wh,
+                        (
+                            program.energy,
+                            program.metabolite_a,
+                            program.metabolite_b,
+                            program.age,
+                            program.generation,
+                            program.tag,
+                            program.trace.clone(),
+                        ),
+                    )
+                })
+                .collect();
+            programs.sort_by_key(|program| program.0);
+            programs
+        };
+        assert_eq!(project(&left), project(&right));
+        assert_eq!(left.ambient_pool, right.ambient_pool);
+        assert_eq!(left.memory.energy_map, right.memory.energy_map);
+        assert_eq!(left.memory.resource_b_map, right.memory.resource_b_map);
+        assert_eq!(left.total_births, right.total_births);
+        assert_eq!(left.total_mutations, right.total_mutations);
+    }
+
+    #[test]
     fn seed_eventually_dies_without_replication() {
         // With very low energy the seed cannot afford ALLOC or COMMIT,
         // so it runs out of energy and dies without replicating.
@@ -1441,6 +1728,222 @@ mod tests {
             }
         )));
         assert_eq!(world.live_count(), 0);
+    }
+
+    #[test]
+    fn dead_organisms_archive_behavior_and_reproductive_output() {
+        let mut cfg = seed_config();
+        cfg.max_program_age = 3;
+        cfg.initial_energy = 100;
+        cfg.resource_sources.clear();
+        let mut world = World::new(cfg);
+
+        world.run(3);
+
+        let archived = world
+            .behavior_archive
+            .iter()
+            .find(|observation| observation.program_id == 0)
+            .expect("dead ancestor behavior");
+        assert_eq!(archived.termination, ObservationTermination::Death);
+        assert_eq!(archived.behavior.steps, 3);
+        assert_eq!(archived.reproductive_output, 0);
+        assert_eq!(archived.end_tick, Some(3));
+    }
+
+    #[test]
+    fn dead_reproducer_keeps_nonzero_output_in_archive() {
+        let mut cfg = seed_config();
+        cfg.max_program_age = 0;
+        cfg.initial_energy = 10_000;
+        cfg.mutation_rate = 0.0;
+        cfg.insertion_rate = 0.0;
+        cfg.deletion_rate = 0.0;
+        cfg.duplication_rate = 0.0;
+        cfg.tag_mutation_rate = 0.0;
+        let mut world = World::new(cfg);
+
+        for _ in 0..10_000 {
+            if world.tick().iter().any(|event| {
+                matches!(
+                    event,
+                    Event::Born {
+                        parent_id: Some(0),
+                        ..
+                    }
+                )
+            }) {
+                break;
+            }
+        }
+        assert!(world.total_births > 0);
+        world.config.max_program_age = world.programs[&0].age + 1;
+        for _ in 0..world.live_count() + 1 {
+            world.tick();
+        }
+
+        assert!(world.behavior_archive.iter().any(|observation| {
+            observation.program_id == 0
+                && observation.termination == ObservationTermination::Death
+                && observation.reproductive_output >= 1
+        }));
+    }
+
+    #[test]
+    fn identity_changes_segment_execution_traces() {
+        let mut cfg = seed_config();
+        cfg.resource_sources.clear();
+        let mut world = World::new(cfg);
+        let original = world.heritable_identity(&world.programs[&0]);
+
+        world.tick();
+        world.programs.get_mut(&0).unwrap().tag = 44;
+        world.tick();
+
+        let segment = world
+            .behavior_archive
+            .iter()
+            .find(|observation| {
+                observation.program_id == 0
+                    && observation.termination == ObservationTermination::IdentityChanged
+            })
+            .expect("identity-change segment");
+        assert_eq!(segment.identity, original);
+        assert_eq!(segment.behavior.steps, 1);
+        let live = world
+            .behavior_observations()
+            .into_iter()
+            .find(|observation| {
+                observation.program_id == 0
+                    && observation.termination == ObservationTermination::Live
+            })
+            .expect("new live segment");
+        assert_eq!(live.identity.tag, 44);
+        assert_eq!(live.behavior.steps, 1);
+    }
+
+    #[test]
+    fn foreign_writes_segment_victim_even_when_event_tracking_is_disabled() {
+        let mut cfg = seed_config();
+        cfg.resource_sources.clear();
+        cfg.foreign_write_tracking = false;
+        let mut world = World::new(cfg);
+        let victim_identity = add_seed_clone(&mut world, 1, 0);
+        let victim_start = world.programs[&1].start;
+        let attacker_start = world.programs[&0].start;
+        world.memory.write(attacker_start, u8::from(Opcode::Write));
+        {
+            let attacker = world.programs.get_mut(&0).unwrap();
+            attacker.ip = attacker_start;
+            attacker.wh = victim_start;
+            attacker.reg_a = 255;
+        }
+
+        let events = world.tick();
+
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, Event::ForeignWrite { .. })));
+        assert!(world.behavior_archive.iter().any(|observation| {
+            observation.program_id == 1
+                && observation.identity == victim_identity
+                && observation.termination == ObservationTermination::IdentityChanged
+        }));
+    }
+
+    #[test]
+    fn new_program_event_waits_for_stable_grandchild_evidence() {
+        let mut cfg = seed_config();
+        cfg.ecotype_min_persistence_ticks = 1;
+        cfg.ecotype_min_reproductive_output = 2;
+        cfg.ecotype_min_descendant_generations = 2;
+        let mut world = World::new(cfg);
+        let mut trace = crate::program::BehaviorTrace::default();
+        trace.record(crate::opcode::Opcode::MovFwd);
+        trace.record(crate::opcode::Opcode::MovBwd);
+        let fixture =
+            |id, parent_id, generation, offspring_ids: Vec<ProgramId>| BehaviorObservation {
+                program_id: id,
+                parent_id,
+                generation,
+                began_at_birth: true,
+                identity: HeritableIdentity::new(100 + id as u64, 7),
+                behavior: trace.clone(),
+                start_tick: 0,
+                end_tick: Some(10),
+                reproductive_output: offspring_ids.len() as u64,
+                offspring_ids,
+                termination: ObservationTermination::Death,
+            };
+        world.behavior_archive.extend([
+            fixture(10, None, 0, vec![11]),
+            fixture(11, Some(10), 1, vec![12]),
+        ]);
+
+        assert!(!world
+            .tick()
+            .iter()
+            .any(|event| matches!(event, Event::NewProgram { .. })));
+
+        world
+            .behavior_archive
+            .push(fixture(12, Some(11), 2, vec![]));
+        let events = world.tick();
+
+        assert!(events.iter().any(|event| matches!(
+            event,
+            Event::NewProgram {
+                descendant_generations: 2,
+                equivalent_raw_genomes: 3,
+                ..
+            }
+        )));
+        assert!(!world
+            .tick()
+            .iter()
+            .any(|event| matches!(event, Event::NewProgram { .. })));
+    }
+
+    #[test]
+    fn extinction_refreshes_final_archived_viability_evidence() {
+        let mut cfg = seed_config();
+        cfg.ecotype_min_persistence_ticks = 100;
+        cfg.ecotype_min_reproductive_output = 2;
+        cfg.ecotype_min_descendant_generations = 2;
+        let mut world = World::new(cfg);
+        let mut trace = crate::program::BehaviorTrace::default();
+        trace.record(Opcode::Nop);
+        for (id, parent_id, generation, offspring_ids) in [
+            (10, None, 0, vec![11]),
+            (11, Some(10), 1, vec![12]),
+            (12, Some(11), 2, vec![]),
+        ] {
+            world.behavior_archive.push(BehaviorObservation {
+                program_id: id,
+                parent_id,
+                generation,
+                began_at_birth: true,
+                identity: HeritableIdentity::new(10, 1),
+                behavior: trace.clone(),
+                start_tick: 0,
+                end_tick: Some(100),
+                reproductive_output: offspring_ids.len() as u64,
+                offspring_ids,
+                termination: ObservationTermination::Death,
+            });
+        }
+        world.programs.get_mut(&0).unwrap().energy = 0;
+
+        assert!(!world
+            .tick()
+            .iter()
+            .any(|event| matches!(event, Event::NewProgram { .. })));
+        let events = world.tick();
+
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, Event::NewProgram { .. })));
+        assert_eq!(world.viable_ecotype_count(), 1);
     }
 
     #[test]

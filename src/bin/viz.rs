@@ -107,7 +107,6 @@ struct App {
     steps_per_frame: u64,
     selected_id: Option<u32>,
     display_mode: DisplayMode,
-    known_genomes: HashSet<HeritableIdentity>,
     known_phenotypes: HashSet<(HeritableIdentity, &'static str)>,
     activity: VecDeque<Activity>,
     live_history: VecDeque<u64>,
@@ -120,11 +119,6 @@ impl App {
     fn new(config: Config) -> Self {
         let world = World::new(config.clone());
         let selected_id = world.programs.keys().min().copied();
-        let known_genomes = world
-            .programs
-            .values()
-            .map(|program| world.heritable_identity(program))
-            .collect();
         let mut app = Self {
             world,
             config,
@@ -132,7 +126,6 @@ impl App {
             steps_per_frame: 100,
             selected_id,
             display_mode: DisplayMode::Genomes,
-            known_genomes,
             known_phenotypes: HashSet::new(),
             activity: VecDeque::new(),
             live_history: VecDeque::new(),
@@ -252,22 +245,7 @@ impl App {
                     generation,
                     ..
                 } => {
-                    let Some(program) = self.world.programs.get(&id) else {
-                        continue;
-                    };
-                    let heritable_identity = self.world.heritable_identity(program);
-                    let drift = self.world.ancestor_distance(program);
-                    if self.known_genomes.insert(heritable_identity) {
-                        self.push_activity(
-                            tick,
-                            format!(
-                                "new identity {:06x}/{:02x}  gen {generation}  drift {drift}",
-                                heritable_identity.genome & 0xffffff,
-                                heritable_identity.tag,
-                            ),
-                            ActivityKind::Novel,
-                        );
-                    } else if generation <= 2 || self.world.total_births.is_multiple_of(25) {
+                    if generation <= 2 || self.world.total_births.is_multiple_of(25) {
                         self.push_activity(
                             tick,
                             format!(
@@ -278,6 +256,22 @@ impl App {
                         );
                     }
                 }
+                Event::NewProgram {
+                    tick,
+                    ecotype_identity,
+                    equivalent_raw_genomes,
+                    persistence_ticks,
+                    reproductive_output,
+                    descendant_generations,
+                } => self.push_activity(
+                    tick,
+                    format!(
+                        "new viable ecotype {:06x}/{:02x}  {equivalent_raw_genomes} genomes, {persistence_ticks} ticks, {reproductive_output} births, {descendant_generations} generations",
+                        ecotype_identity.heritable_identity.genome & 0xffffff,
+                        ecotype_identity.heritable_identity.tag,
+                    ),
+                    ActivityKind::Novel,
+                ),
                 Event::Died { tick, id, cause } => {
                     if self.world.total_deaths.is_multiple_of(20) {
                         self.push_activity(
@@ -672,12 +666,26 @@ fn render_header(app: &App, frame: &mut Frame, area: Rect) {
             ),
             Span::raw("alive   "),
             Span::styled(
-                format!("{:>4} ", world.live_heritable_identities()),
+                format!("{:>4} ", world.live_genomes()),
                 Style::default()
                     .fg(Color::Rgb(247, 37, 133))
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::raw("identities  "),
+            Span::raw("raw genomes  "),
+            Span::styled(
+                format!("{:>4} ", world.live_heritable_identities()),
+                Style::default()
+                    .fg(Color::Rgb(157, 78, 221))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("heritable  "),
+            Span::styled(
+                format!("{:>4} ", world.viable_ecotype_count()),
+                Style::default()
+                    .fg(Color::Rgb(255, 190, 11))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("viable ecotypes  "),
             Span::styled(
                 format!("G{:>3} ", world.max_generation),
                 Style::default()

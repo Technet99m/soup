@@ -8,7 +8,7 @@ pub const TRACE_OPCODE_COUNT: usize = Opcode::COUNT as usize;
 
 /// A compact phenotype trace. Genomes are classified by what they execute and
 /// exchange, rather than by byte differences alone.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BehaviorTrace {
     pub steps: u64,
     pub opcode_counts: [u64; TRACE_OPCODE_COUNT],
@@ -166,5 +166,19 @@ mod tests {
         assert!(p.owns(149));
         assert!(!p.owns(150));
         assert!(!p.owns(99));
+    }
+
+    #[test]
+    fn trace_normalizes_nop_aliases_and_distinguishes_halt() {
+        let mut canonical_nop = BehaviorTrace::default();
+        canonical_nop.record(Opcode::from(0));
+        let mut aliased_nop = BehaviorTrace::default();
+        aliased_nop.record(Opcode::from(47));
+        let mut halt = BehaviorTrace::default();
+        halt.record(Opcode::from(255));
+
+        assert_eq!(canonical_nop.opcode_counts, aliased_nop.opcode_counts);
+        assert_ne!(canonical_nop.opcode_counts, halt.opcode_counts);
+        assert_eq!(halt.opcode_counts[47], 1);
     }
 }

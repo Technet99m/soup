@@ -39,6 +39,8 @@ pub struct StatsSnapshot {
     pub live_genomes: usize,
     /// Number of distinct live byte-and-tag evolutionary identities.
     pub live_heritable_identities: usize,
+    /// Persistent behavior/recognition classes with stable descendants.
+    pub viable_ecotypes: usize,
     pub max_generation: u32,
     pub max_ancestor_distance: usize,
     pub total_births: u64,
@@ -61,11 +63,12 @@ impl StatsSnapshot {
     /// Column headings for the headless statistics rows.
     pub fn headless_header() -> String {
         format!(
-            "{:>12}  {:>5}  {:>11}  {:>20}  {:>4}  {:>5}  {:>7}  {:>9}  {:>6}  {:>10}  {:>9}  {:>9}  {}",
+            "{:>12}  {:>5}  {:>11}  {:>20}  {:>16}  {:>4}  {:>5}  {:>7}  {:>9}  {:>6}  {:>10}  {:>9}  {:>9}  {}",
             "tick",
             "live",
             "raw_genomes",
             "heritable_identities",
+            "viable_ecotypes",
             "gen",
             "drift",
             "births",
@@ -85,6 +88,7 @@ impl StatsSnapshot {
 
         let live_genomes = world.live_genomes();
         let live_heritable_identities = world.live_heritable_identities();
+        let viable_ecotypes = world.viable_ecotype_count();
         let max_ancestor_distance = world
             .programs
             .values()
@@ -119,6 +123,7 @@ impl StatsSnapshot {
             memory_utilization,
             live_genomes,
             live_heritable_identities,
+            viable_ecotypes,
             max_generation: world.max_generation,
             max_ancestor_distance,
             total_births: world.total_births,
@@ -143,11 +148,12 @@ impl StatsSnapshot {
             .collect::<Vec<_>>()
             .join(",");
         format!(
-            "{:>12}  {:>5}  {:>11}  {:>20}  {:>4}  {:>5}  {:>7}  {:>9}  {:>5.1}%  {:>10}  {:>9}  {:>9}  {}",
+            "{:>12}  {:>5}  {:>11}  {:>20}  {:>16}  {:>4}  {:>5}  {:>7}  {:>9}  {:>5.1}%  {:>10}  {:>9}  {:>9}  {}",
             self.tick,
             self.live_programs,
             self.live_genomes,
             self.live_heritable_identities,
+            self.viable_ecotypes,
             self.max_generation,
             self.max_ancestor_distance,
             self.total_births,
@@ -247,13 +253,14 @@ mod tests {
 
         assert!(header.contains("raw_genomes"));
         assert!(header.contains("heritable_identities"));
+        assert!(header.contains("viable_ecotypes"));
         assert_eq!(
             header.split_whitespace().count(),
             line.split_whitespace().count()
         );
         assert_eq!(
-            &token_end_columns(&header)[..12],
-            &token_end_columns(&line)[..12]
+            &token_end_columns(&header)[..13],
+            &token_end_columns(&line)[..13]
         );
     }
 }

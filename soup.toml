@@ -28,6 +28,10 @@ interaction_radius    = 256   # inclusive circular radius for resource, foreign,
 foreign_write_tracking = true # expose predation in the evolution observer
 loop_max_depth        = 8
 ticks_per_stat_log    = 10_000
+# Observer-only ecotype evidence thresholds. These never affect selection.
+ecotype_min_persistence_ticks = 10_000
+ecotype_min_reproductive_output = 2
+ecotype_min_descendant_generations = 2 # matching grandchild required
 rng_seed              = 14201
 memory_size           = 65536
 
