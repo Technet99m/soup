@@ -5,7 +5,9 @@ use crate::{
     ecotype::{
         viable_ecotypes, BehaviorObservation, ObservationTermination, ViabilityRule, ViableEcotype,
     },
-    events::{DeathCause, Event, ResourceKind, StructuralMutationKind},
+    events::{
+        DeathCause, Event, ResourceKind, StructuralMutationFailureReason, StructuralMutationKind,
+    },
     identity::{EcotypeEquivalence, HeritableIdentity},
     memory::Memory,
     mutation::{self, Direction},
@@ -759,12 +761,13 @@ impl World {
             let old_length = child.length;
             let mut genome = self.memory.read_slice(child.start, child.length);
             let mut mutation_index = 0usize;
-            match kind {
+            let admission_failure = match kind {
                 StructuralMutationKind::Insertion
                     if child.length < self.config.max_genome_length =>
                 {
                     mutation_index = self.rng.gen_range(0..=genome.len());
                     genome.insert(mutation_index, mutation::insert(self.rng.gen()));
+                    None
                 }
                 StructuralMutationKind::Deletion if genome.len() > 4 => {
                     mutation_index = self.rng.gen_range(0..genome.len());
@@ -773,6 +776,7 @@ impl World {
                         .min(genome.len() - 4);
                     let span = self.rng.gen_range(1..=max_span);
                     genome.drain(mutation_index..mutation_index + span);
+                    None
                 }
                 StructuralMutationKind::Duplication
                     if child.length < self.config.max_genome_length =>
@@ -786,13 +790,33 @@ impl World {
                         mutation_index = self.rng.gen_range(0..=genome.len());
                         genome.splice(mutation_index..mutation_index, duplicate);
                     }
+                    None
                 }
-                _ => {}
-            }
+                StructuralMutationKind::Deletion => {
+                    Some(StructuralMutationFailureReason::MinimumLength)
+                }
+                StructuralMutationKind::Insertion | StructuralMutationKind::Duplication => {
+                    Some(StructuralMutationFailureReason::MaximumLength)
+                }
+            };
 
             let new_length = genome.len() as u16;
-            if new_length != old_length && self.install_resized_genome(child, parent_start, &genome)
-            {
+            if let Some(reason) = admission_failure {
+                let attempted_length = match kind {
+                    StructuralMutationKind::Insertion => old_length.saturating_add(1),
+                    StructuralMutationKind::Deletion => old_length.saturating_sub(1),
+                    StructuralMutationKind::Duplication => old_length.saturating_add(1),
+                };
+                events.push(Event::StructuralMutationFailed {
+                    tick: self.tick,
+                    id: child.id,
+                    parent_id: child.parent_id.unwrap_or_default(),
+                    kind,
+                    old_length,
+                    attempted_length,
+                    reason,
+                });
+            } else if self.install_resized_genome(child, parent_start, &genome) {
                 child.ip = child.start;
                 child.rh = child.start;
                 child.wh = child.start;
@@ -805,6 +829,16 @@ impl World {
                     index: mutation_index as u16,
                     old_length,
                     new_length,
+                });
+            } else {
+                events.push(Event::StructuralMutationFailed {
+                    tick: self.tick,
+                    id: child.id,
+                    parent_id: child.parent_id.unwrap_or_default(),
+                    kind,
+                    old_length,
+                    attempted_length: new_length,
+                    reason: StructuralMutationFailureReason::NoSpace,
                 });
             }
         }
@@ -845,6 +879,15 @@ impl World {
     ) -> bool {
         let new_length = genome.len() as u16;
         if new_length > child.length {
+            let growth = new_length - child.length;
+            let extension_start = child.start as u32 + child.length as u32;
+            if extension_start <= u16::MAX as u32
+                && self.free_list.alloc_at(extension_start as u16, growth)
+            {
+                self.memory.place(child.start, genome);
+                child.length = new_length;
+                return true;
+            }
             let Some(new_start) = self.free_list.alloc_near(parent_start, new_length) else {
                 return false;
             };
@@ -2091,6 +2134,134 @@ mod tests {
         }
         assert!(mutation_count > 0, "Should observe mutations with rate=1.0");
         assert!(world.total_mutations > 0);
+    }
+
+    fn structural_growth_fixture(adjacent_free: u16) -> (World, Program) {
+        let mut cfg = seed_config();
+        cfg.insertion_rate = 1.0;
+        cfg.deletion_rate = 0.0;
+        cfg.duplication_rate = 0.0;
+        cfg.tag_mutation_rate = 0.0;
+        cfg.max_genome_length = 64;
+        let mut world = World::new(cfg);
+        let start = 1_000u16;
+        let bytes = [10, 20, 30, 40];
+        world.memory.place(start, &bytes);
+        let free_end = start as u32 + bytes.len() as u32 + adjacent_free as u32;
+        world.free_list = make_free_list(
+            65_536,
+            &[
+                (0, start + bytes.len() as u16),
+                (free_end as u16, (65_536 - free_end) as u16),
+            ],
+        );
+        let child = Program::new(99, start, bytes.len() as u16, 321, Some(0), None, None);
+        (world, child)
+    }
+
+    #[test]
+    fn selected_insertion_grows_in_place_without_a_second_complete_block() {
+        let (mut world, mut child) = structural_growth_fixture(1);
+        let owners_before = world.addr_to_owner.clone();
+
+        let mut events = Vec::new();
+        world.apply_birth_mutations(&mut child, 500, &mut events);
+
+        assert_eq!(child.start, 1_000);
+        assert_eq!(child.length, 5);
+        assert_eq!(world.free_list.free_bytes(), 0);
+        let genome = world.memory.read_slice(child.start, child.length);
+        assert!((0..genome.len()).any(|index| {
+            let mut without_insertion = genome.clone();
+            without_insertion.remove(index);
+            without_insertion == [10, 20, 30, 40]
+        }));
+        assert!(matches!(
+            events.as_slice(),
+            [Event::StructuralMutation {
+                kind: StructuralMutationKind::Insertion,
+                old_length: 4,
+                new_length: 5,
+                ..
+            }]
+        ));
+        assert_eq!(world.addr_to_owner, owners_before);
+        assert_eq!(child.energy, 321);
+        assert_eq!(child.pending_allocation, None);
+    }
+
+    #[test]
+    fn compact_and_fragmented_adjacent_capacity_realize_the_same_insertion() {
+        let (fragmented, child) = structural_growth_fixture(1);
+        let mut compact = fragmented.clone();
+        compact.free_list = make_free_list(65_536, &[(0, 1_004), (1_024, 64_512)]);
+        let mut fragmented = fragmented;
+        let mut compact_child = child.clone();
+        let mut fragmented_child = child;
+        let mut compact_events = Vec::new();
+        let mut fragmented_events = Vec::new();
+
+        compact.apply_birth_mutations(&mut compact_child, 500, &mut compact_events);
+        fragmented.apply_birth_mutations(&mut fragmented_child, 500, &mut fragmented_events);
+
+        assert_eq!(compact_child.start, fragmented_child.start);
+        assert_eq!(compact_child.length, fragmented_child.length);
+        assert_eq!(
+            compact
+                .memory
+                .read_slice(compact_child.start, compact_child.length),
+            fragmented
+                .memory
+                .read_slice(fragmented_child.start, fragmented_child.length)
+        );
+        assert_eq!(
+            serde_json::to_value(compact_events).unwrap(),
+            serde_json::to_value(fragmented_events).unwrap()
+        );
+    }
+
+    #[test]
+    fn impossible_insertion_is_explicit_atomic_and_replayable() {
+        let (world, child) = structural_growth_fixture(0);
+        let mut replay = world.clone();
+        let mut world = world;
+        let mut replay_child = child.clone();
+        let mut child = child;
+        let genome_before = world.memory.read_slice(child.start, child.length);
+        let owners_before = world.addr_to_owner.clone();
+        let budget_before = world.accounted_budget();
+        let mut events = Vec::new();
+        let mut replay_events = Vec::new();
+
+        world.apply_birth_mutations(&mut child, 500, &mut events);
+        replay.apply_birth_mutations(&mut replay_child, 500, &mut replay_events);
+
+        assert!(matches!(
+            events.as_slice(),
+            [Event::StructuralMutationFailed {
+                kind: StructuralMutationKind::Insertion,
+                reason: StructuralMutationFailureReason::NoSpace,
+                old_length: 4,
+                attempted_length: 5,
+                ..
+            }]
+        ));
+        assert_eq!(child.start, 1_000);
+        assert_eq!(child.length, 4);
+        assert_eq!(
+            world.memory.read_slice(child.start, child.length),
+            genome_before
+        );
+        assert_eq!(world.free_list.free_bytes(), 0);
+        assert_eq!(world.addr_to_owner, owners_before);
+        assert_eq!(world.accounted_budget(), budget_before);
+        assert_eq!(child.energy, 321);
+        assert_eq!(child.pending_allocation, None);
+        assert_eq!(
+            serde_json::to_value(&events).unwrap(),
+            serde_json::to_value(&replay_events).unwrap()
+        );
+        assert_eq!(world.state_digest(), replay.state_digest());
     }
 
     #[test]

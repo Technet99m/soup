@@ -5,6 +5,7 @@ A single 18-byte ancestor enters a circular 64 KiB memory and leaves descendants
 The redesign gives evolution room to change more than byte values:
 
 - insertions, deletions, and gene-like span duplications change genome length;
+- birth-time growth claims adjacent capacity atomically when possible, while impossible selected edits emit an explicit failure event and leave inheritance and accounting unchanged;
 - the ancestor measures its current length, so resized descendants can still reproduce;
 - offspring usually occupy memory beside their parent, allowing persistent local ecologies;
 - A and B resources come from organism-independent fixed or moving sources, flow in opposite currents, occupy separate internal stores, require different uptake/conversion/excretion instructions, and can only be found locally;

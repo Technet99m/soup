@@ -58,6 +58,17 @@ pub enum Event {
         old_length: u16,
         new_length: u16,
     },
+    /// A selected structural operator could not be installed. The child is
+    /// still born with its unchanged inherited genome and no mutation is counted.
+    StructuralMutationFailed {
+        tick: u64,
+        id: ProgramId,
+        parent_id: ProgramId,
+        kind: StructuralMutationKind,
+        old_length: u16,
+        attempted_length: u16,
+        reason: StructuralMutationFailureReason,
+    },
     TagChanged {
         tick: u64,
         id: ProgramId,
@@ -111,6 +122,14 @@ pub enum StructuralMutationKind {
     Insertion,
     Deletion,
     Duplication,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StructuralMutationFailureReason {
+    NoSpace,
+    MaximumLength,
+    MinimumLength,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

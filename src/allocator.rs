@@ -100,6 +100,42 @@ impl FreeList {
         Some(start)
     }
 
+    /// Reserve an exact linear subrange of a free block.
+    ///
+    /// Allocations never wrap around the end of the 64 KiB address space.
+    pub fn alloc_at(&mut self, start: u16, size: u16) -> bool {
+        if size == 0 {
+            return false;
+        }
+        let start32 = start as u32;
+        let end = start32 + size as u32;
+        let Some(index) = self
+            .blocks
+            .iter()
+            .position(|block| block.start as u32 <= start32 && end <= block.end())
+        else {
+            return false;
+        };
+
+        let block = self.blocks.remove(index);
+        let before = start32 - block.start as u32;
+        let after = block.end() - end;
+        if before > 0 {
+            self.blocks.push(FreeBlock {
+                start: block.start,
+                length: before,
+            });
+        }
+        if after > 0 {
+            self.blocks.push(FreeBlock {
+                start: end as u16,
+                length: after,
+            });
+        }
+        self.blocks.sort_unstable_by_key(|block| block.start);
+        true
+    }
+
     /// Return a region to the free list and coalesce adjacent blocks.
     pub fn free(&mut self, start: u16, length: u16) {
         if length == 0 {
@@ -273,5 +309,29 @@ mod tests {
         assert!(!fl.is_free(350, 20));
         assert_eq!(fl.free_bytes(), 480);
         assert_eq!(fl.num_blocks(), 2);
+    }
+
+    #[test]
+    fn alloc_at_reserves_only_the_requested_subrange() {
+        let mut fl = FreeList::new(100, 100);
+
+        assert!(fl.alloc_at(140, 20));
+
+        assert_eq!(
+            fl.blocks(),
+            &[
+                FreeBlock {
+                    start: 100,
+                    length: 40,
+                },
+                FreeBlock {
+                    start: 160,
+                    length: 40,
+                },
+            ]
+        );
+        assert_eq!(fl.free_bytes(), 80);
+        assert!(!fl.alloc_at(130, 20));
+        assert_eq!(fl.free_bytes(), 80);
     }
 }
