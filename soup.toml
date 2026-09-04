@@ -1,13 +1,6 @@
 # Soup simulation configuration
 # All fields are optional — missing fields use defaults.
 
-# --- Energy deployment ---
-ambient_drip_interval = 10    # ticks between drip events (lower = more frequent)
-ambient_drip_amount   = 500   # energy added to a random cell per drip
-energy_rain_width     = 8     # concentrated cells; one local harvest can fund a copy cycle
-energy_rain_life_bias = 0.95  # fraction of fronts centered near existing life
-energy_rain_radius    = 96    # max address distance from the chosen organism
-
 # --- Energy decay ---
 energy_decay_rate     = 1     # energy subtracted per decay sweep
 energy_decay_interval = 100   # ticks between decay sweeps
@@ -37,3 +30,39 @@ loop_max_depth        = 8
 ticks_per_stat_log    = 10_000
 rng_seed              = 14201
 memory_size           = 65536
+
+# --- Organism-independent resource sources ---
+# Offsets are relative to a deterministic origin derived from rng_seed. Each
+# source emits from the conserved ambient pool on its own cadence and may move
+# by velocity cells after every emission.
+[[resource_sources]]
+kind = "a"
+offset = 0
+interval = 10
+amount = 200
+width = 8
+velocity = 0
+
+[[resource_sources]]
+kind = "b"
+offset = 128
+interval = 10
+amount = 50
+width = 8
+velocity = -1
+
+[[resource_sources]]
+kind = "b"
+offset = 16384
+interval = 10
+amount = 125
+width = 8
+velocity = 0
+
+[[resource_sources]]
+kind = "a"
+offset = 32768
+interval = 10
+amount = 125
+width = 8
+velocity = 1

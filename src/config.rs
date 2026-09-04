@@ -1,5 +1,35 @@
+use crate::events::ResourceKind;
 use serde::Deserialize;
 use std::path::PathBuf;
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct ResourceSource {
+    /// Resource-map address relative to the seed-derived environment origin.
+    pub offset: u16,
+    pub kind: ResourceKind,
+    /// Ticks between emissions. Zero disables this source.
+    pub interval: u64,
+    /// Energy requested from the conserved ambient pool per emission.
+    pub amount: u32,
+    /// Number of consecutive cells receiving each emission.
+    pub width: usize,
+    /// Cells moved after each emission; negative values move backward.
+    pub velocity: i16,
+}
+
+impl Default for ResourceSource {
+    fn default() -> Self {
+        Self {
+            offset: 0,
+            kind: ResourceKind::A,
+            interval: 10,
+            amount: 125,
+            width: 8,
+            velocity: 0,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
@@ -39,16 +69,8 @@ pub struct Config {
     pub total_energy: u64,
     /// Energy transferred from parent to child on COMMIT. Default: 500.
     pub child_energy: u32,
-    /// How many ticks between ambient drip events. Default: 10.
-    pub ambient_drip_interval: u64,
-    /// Energy deposited to a random cell per drip event. Default: 500.
-    pub ambient_drip_amount: u32,
-    /// Width in cells of each random energy front. Default: 8.
-    pub energy_rain_width: usize,
-    /// Chance that a front lands near a randomly chosen live organism. Default: 0.95.
-    pub energy_rain_life_bias: f64,
-    /// Maximum circular offset for life-biased rain. Default: 96.
-    pub energy_rain_radius: u16,
+    /// Organism-independent fixed or moving resource emitters.
+    pub resource_sources: Vec<ResourceSource>,
     /// Emit ForeignExec events when a program's IP is in another program's region. Default: true.
     pub foreign_exec_tracking: bool,
     /// Emit ForeignWrite events when a program writes to another program's region. Default: true.
@@ -85,11 +107,32 @@ impl Default for Config {
             energy_current: 17,
             total_energy: 1_000_000,
             child_energy: 500,
-            ambient_drip_interval: 10,
-            ambient_drip_amount: 500,
-            energy_rain_width: 8,
-            energy_rain_life_bias: 0.95,
-            energy_rain_radius: 96,
+            resource_sources: vec![
+                ResourceSource {
+                    offset: 0,
+                    kind: ResourceKind::A,
+                    amount: 200,
+                    ..ResourceSource::default()
+                },
+                ResourceSource {
+                    offset: 128,
+                    kind: ResourceKind::B,
+                    amount: 50,
+                    velocity: -1,
+                    ..ResourceSource::default()
+                },
+                ResourceSource {
+                    offset: 16_384,
+                    kind: ResourceKind::B,
+                    ..ResourceSource::default()
+                },
+                ResourceSource {
+                    offset: 32_768,
+                    kind: ResourceKind::A,
+                    velocity: 1,
+                    ..ResourceSource::default()
+                },
+            ],
             foreign_exec_tracking: true,
             foreign_write_tracking: true,
             log_path: PathBuf::from("soup.log"),
@@ -129,11 +172,7 @@ impl Config {
                 c.energy_current = file_cfg.energy_current;
                 c.total_energy = file_cfg.total_energy;
                 c.child_energy = file_cfg.child_energy;
-                c.ambient_drip_interval = file_cfg.ambient_drip_interval;
-                c.ambient_drip_amount = file_cfg.ambient_drip_amount;
-                c.energy_rain_width = file_cfg.energy_rain_width;
-                c.energy_rain_life_bias = file_cfg.energy_rain_life_bias;
-                c.energy_rain_radius = file_cfg.energy_rain_radius;
+                c.resource_sources = file_cfg.resource_sources;
                 c.foreign_exec_tracking = file_cfg.foreign_exec_tracking;
                 c.foreign_write_tracking = file_cfg.foreign_write_tracking;
             }
@@ -169,11 +208,6 @@ impl Config {
         parse_env!(energy_current, "ENERGY_CURRENT");
         parse_env!(total_energy, "TOTAL_ENERGY");
         parse_env!(child_energy, "CHILD_ENERGY");
-        parse_env!(ambient_drip_interval, "AMBIENT_DRIP_INTERVAL");
-        parse_env!(ambient_drip_amount, "AMBIENT_DRIP_AMOUNT");
-        parse_env!(energy_rain_width, "ENERGY_RAIN_WIDTH");
-        parse_env!(energy_rain_life_bias, "ENERGY_RAIN_LIFE_BIAS");
-        parse_env!(energy_rain_radius, "ENERGY_RAIN_RADIUS");
         parse_env!(foreign_exec_tracking, "FOREIGN_EXEC_TRACKING");
         parse_env!(foreign_write_tracking, "FOREIGN_WRITE_TRACKING");
         if let Ok(v) = std::env::var("LOG_PATH") {
