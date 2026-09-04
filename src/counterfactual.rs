@@ -47,10 +47,11 @@ impl TrialSnapshot {
     pub fn capture(world: &World) -> Option<Self> {
         world
             .candidate_partner_pair()
-            .map(|pair| Self::from_pair(world, pair))
+            .map(|pair| Self::capture_for_pair(world, pair))
     }
 
-    fn from_pair(
+    /// Capture an immutable world and an explicitly selected identity pair.
+    pub fn capture_for_pair(
         world: &World,
         heritable_identity_pair: (HeritableIdentity, HeritableIdentity),
     ) -> Self {
@@ -138,6 +139,8 @@ struct Cancellation {
 
 impl Cancellation {
     fn cancel(&self) {
+        #[cfg(test)]
+        let _wait_guard = self.wait_lock.lock().expect("cancellation lock poisoned");
         self.cancelled.store(true, Ordering::Release);
         #[cfg(test)]
         self.wait.notify_all();
@@ -211,7 +214,7 @@ impl TrialWorker {
             let pair = snapshot.heritable_identity_pair;
             let report = snapshot
                 .world
-                .counterfactual_symbiosis_for(pair, horizon, |completed| {
+                .counterfactual_symbiosis_for_pair_with_control(pair, horizon, |completed| {
                     if completed == 0 || completed == horizon || completed.is_multiple_of(interval)
                     {
                         reporter.progress(completed, horizon);
@@ -491,7 +494,7 @@ mod tests {
     #[test]
     fn snapshot_is_immutable_and_records_source_tick_and_pair() {
         let mut live_world = world_at(41);
-        let snapshot = TrialSnapshot::from_pair(&live_world, pair(0xaaa, 0xbbb));
+        let snapshot = TrialSnapshot::capture_for_pair(&live_world, pair(0xaaa, 0xbbb));
         live_world.tick = 99;
 
         assert_eq!(snapshot.source_tick(), 41);
@@ -500,10 +503,7 @@ mod tests {
         assert_eq!(live_world.tick, 99);
     }
 
-    fn report(
-        pair: (HeritableIdentity, HeritableIdentity),
-        horizon: u64,
-    ) -> SymbiosisReport {
+    fn report(pair: (HeritableIdentity, HeritableIdentity), horizon: u64) -> SymbiosisReport {
         SymbiosisReport {
             heritable_identity_a: pair.0,
             heritable_identity_b: pair.1,
@@ -530,7 +530,7 @@ mod tests {
 
     #[test]
     fn worker_delivers_progress_and_result_with_snapshot_metadata() {
-        let snapshot = TrialSnapshot::from_pair(&world_at(7), pair(0x123, 0x456));
+        let snapshot = TrialSnapshot::capture_for_pair(&world_at(7), pair(0x123, 0x456));
         let mut worker = TrialWorker::default();
         let (done_tx, done_rx) = mpsc::channel();
 
@@ -575,7 +575,7 @@ mod tests {
 
     #[test]
     fn cancellation_stops_the_active_trial() {
-        let snapshot = TrialSnapshot::from_pair(&world_at(8), pair(1, 2));
+        let snapshot = TrialSnapshot::capture_for_pair(&world_at(8), pair(1, 2));
         let mut worker = TrialWorker::default();
         let (started_tx, started_rx) = mpsc::channel();
         let (continue_tx, continue_rx) = mpsc::channel();
@@ -614,7 +614,7 @@ mod tests {
         let (release_tx, release_rx) = mpsc::channel();
         worker
             .start_with(
-                TrialSnapshot::from_pair(&world_at(1), pair(1, 2)),
+                TrialSnapshot::capture_for_pair(&world_at(1), pair(1, 2)),
                 10,
                 move |_, _, reporter| {
                     started_tx.send(()).unwrap();
@@ -631,7 +631,7 @@ mod tests {
 
         let error = worker
             .start_with(
-                TrialSnapshot::from_pair(&world_at(2), pair(3, 4)),
+                TrialSnapshot::capture_for_pair(&world_at(2), pair(3, 4)),
                 10,
                 |snapshot, horizon, _| {
                     TrialRunResult::Completed(report(snapshot.heritable_identity_pair(), horizon))
@@ -652,7 +652,7 @@ mod tests {
         let mut worker = TrialWorker::default();
         worker
             .start_with(
-                TrialSnapshot::from_pair(&world_at(3), pair(5, 6)),
+                TrialSnapshot::capture_for_pair(&world_at(3), pair(5, 6)),
                 10,
                 move |_, _, reporter| {
                     started_tx.send(()).unwrap();
@@ -674,7 +674,7 @@ mod tests {
         let mut worker = TrialWorker::default();
         worker
             .start_with(
-                TrialSnapshot::from_pair(&world_at(12), pair(0xaaa, 0xbbb)),
+                TrialSnapshot::capture_for_pair(&world_at(12), pair(0xaaa, 0xbbb)),
                 10,
                 |_, _, _| panic!("sensitive panic payload"),
             )
@@ -701,7 +701,7 @@ mod tests {
         let mut worker = TrialWorker::default();
         worker
             .start_with_spawner(
-                TrialSnapshot::from_pair(&world_at(13), pair(1, 2)),
+                TrialSnapshot::capture_for_pair(&world_at(13), pair(1, 2)),
                 10,
                 |_job| Ok(std::thread::spawn(|| {})),
                 |snapshot, horizon, _| {
@@ -726,7 +726,7 @@ mod tests {
     fn spawn_failure_becomes_a_terminal_failure_without_panicking() {
         let mut worker = TrialWorker::default();
         let result = worker.start_with_spawner(
-            TrialSnapshot::from_pair(&world_at(14), pair(3, 4)),
+            TrialSnapshot::capture_for_pair(&world_at(14), pair(3, 4)),
             10,
             |_job| Err::<JoinHandle<()>, _>(io::Error::other("sensitive operating system detail")),
             |snapshot, horizon, _| {
@@ -755,7 +755,7 @@ mod tests {
         let mut worker = TrialWorker::default();
         worker
             .start_with(
-                TrialSnapshot::from_pair(&world_at(15), pair(5, 6)),
+                TrialSnapshot::capture_for_pair(&world_at(15), pair(5, 6)),
                 10,
                 |_, _, _| panic!("task failed before shutdown"),
             )
@@ -779,7 +779,7 @@ mod tests {
     fn cleanup_returns_a_pending_startup_failure() {
         let mut worker = TrialWorker::default();
         let result = worker.start_with_spawner(
-            TrialSnapshot::from_pair(&world_at(16), pair(7, 8)),
+            TrialSnapshot::capture_for_pair(&world_at(16), pair(7, 8)),
             10,
             |_job| Err::<JoinHandle<()>, _>(io::Error::other("private OS detail")),
             |snapshot, horizon, _| {
@@ -803,7 +803,7 @@ mod tests {
         let mut worker = TrialWorker::default();
         worker
             .start_with_spawner(
-                TrialSnapshot::from_pair(&world_at(17), pair(9, 10)),
+                TrialSnapshot::capture_for_pair(&world_at(17), pair(9, 10)),
                 10,
                 |_job| Ok(std::thread::spawn(|| {})),
                 |snapshot, horizon, _| {
@@ -828,7 +828,7 @@ mod tests {
         let mut worker = TrialWorker::default();
         worker
             .start_with_spawner(
-                TrialSnapshot::from_pair(&world_at(15), pair(5, 6)),
+                TrialSnapshot::capture_for_pair(&world_at(15), pair(5, 6)),
                 10,
                 |job| {
                     Ok(std::thread::spawn(move || {

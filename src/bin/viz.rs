@@ -1286,8 +1286,14 @@ mod tests {
         app.handle_trial_event(TrialEvent::Completed {
             source_tick: 123,
             report: SymbiosisReport {
-                heritable_identity_a: HeritableIdentity { genome: 0xaaa, tag: 1 },
-                heritable_identity_b: HeritableIdentity { genome: 0xbbb, tag: 2 },
+                heritable_identity_a: HeritableIdentity {
+                    genome: 0xaaa,
+                    tag: 1,
+                },
+                heritable_identity_b: HeritableIdentity {
+                    genome: 0xbbb,
+                    tag: 2,
+                },
                 horizon: 10,
                 baseline_births_a: 3,
                 baseline_births_b: 4,

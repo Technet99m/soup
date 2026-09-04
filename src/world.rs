@@ -889,12 +889,22 @@ impl World {
     /// removed organisms' freed CPU share from masquerading as a benefit.
     pub fn counterfactual_symbiosis(&self, horizon: u64) -> Option<SymbiosisReport> {
         let pair = self.candidate_partner_pair()?;
-        self.counterfactual_symbiosis_for(pair, horizon, |_| true)
+        Some(self.counterfactual_symbiosis_for_pair(pair, horizon))
+    }
+
+    /// Run a counterfactual trial for an explicitly selected heritable-identity pair.
+    pub fn counterfactual_symbiosis_for_pair(
+        &self,
+        pair: (HeritableIdentity, HeritableIdentity),
+        horizon: u64,
+    ) -> SymbiosisReport {
+        self.counterfactual_symbiosis_for_pair_with_control(pair, horizon, |_| true)
+            .expect("an uncancelled counterfactual always completes")
     }
 
     /// Runs a specified candidate pair while allowing a worker to report progress
     /// and cooperatively cancel between simulated ticks.
-    pub(crate) fn counterfactual_symbiosis_for<F>(
+    pub(crate) fn counterfactual_symbiosis_for_pair_with_control<F>(
         &self,
         (heritable_identity_a, heritable_identity_b): (HeritableIdentity, HeritableIdentity),
         horizon: u64,
