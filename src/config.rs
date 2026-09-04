@@ -1,9 +1,9 @@
 use crate::events::ResourceKind;
 use crate::mutation::MutationStrategy;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct ResourceSource {
     /// Resource-map address relative to the seed-derived environment origin.
@@ -32,7 +32,7 @@ impl Default for ResourceSource {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
 pub struct Config {
     pub memory_size: usize,
@@ -92,11 +92,9 @@ pub struct Config {
     pub foreign_exec_tracking: bool,
     /// Emit ForeignWrite events when a program writes to another program's region. Default: true.
     pub foreign_write_tracking: bool,
-    #[serde(skip)]
     pub log_path: PathBuf,
     /// Directory containing `*.toml` template files. Default: "templates".
     /// Falls back to hardcoded SEED if missing or empty.
-    #[serde(skip)]
     pub templates_dir: PathBuf,
 }
 

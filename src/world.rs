@@ -487,6 +487,11 @@ impl World {
     /// Create a new World, loading templates and placing each at random addresses.
     pub fn new(config: Config) -> Self {
         let templates = template::load_templates(&config.templates_dir);
+        Self::new_with_templates(config, templates)
+    }
+
+    /// Create a world from an already captured template set.
+    pub(crate) fn new_with_templates(config: Config, templates: Vec<template::Template>) -> Self {
         let run_namespace = canonical::namespace(&config, &templates);
         let mut birth_history = run_namespace;
         let num = templates.len();

@@ -1,0 +1,4 @@
+# Curated deterministic replicates for a quick batch smoke test.
+14201
+14202
+14203
