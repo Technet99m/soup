@@ -174,13 +174,16 @@ impl World {
 
         let mut programs = HashMap::new();
         let mut queue = VecDeque::new();
+        let mut remaining_energy = config.total_energy;
 
         for (i, &(start, len)) in placements.iter().enumerate() {
+            let seed_energy = remaining_energy.min(config.initial_energy as u64) as u32;
+            remaining_energy -= seed_energy as u64;
             let prog = Program::new(
                 i as ProgramId,
                 start,
                 len,
-                config.initial_energy,
+                seed_energy,
                 None,
                 None,
                 Some(i as u8),
@@ -192,8 +195,7 @@ impl World {
         let template_names = templates.iter().map(|t| t.name.clone()).collect();
         let template_bytes = templates.into_iter().map(|t| t.bytes).collect();
 
-        let seed_energy: u64 = programs.values().map(|p| p.energy as u64).sum();
-        let ambient_pool = config.total_energy.saturating_sub(seed_energy);
+        let ambient_pool = remaining_energy;
 
         let mut addr_to_owner: Box<[Option<ProgramId>]> = vec![None; 65536].into_boxed_slice();
         let mut program_tags = vec![0; num];
@@ -343,7 +345,8 @@ impl World {
                         for offset in 0..p.length as usize {
                             self.addr_to_owner[(p.start as usize + offset) % 65536] = None;
                         }
-                        self.ambient_pool += p.energy as u64;
+                        self.ambient_pool +=
+                            p.energy as u64 + p.metabolite_a as u64 + p.metabolite_b as u64;
                         self.free_list.free(p.start, p.length);
                         events.push(Event::Died {
                             tick: self.tick,
@@ -364,7 +367,8 @@ impl World {
                     for offset in 0..p.length as usize {
                         self.addr_to_owner[(p.start as usize + offset) % 65536] = None;
                     }
-                    self.ambient_pool += p.energy as u64;
+                    self.ambient_pool +=
+                        p.energy as u64 + p.metabolite_a as u64 + p.metabolite_b as u64;
                     self.free_list.free(p.start, p.length);
                     events.push(Event::Died {
                         tick: self.tick,
@@ -382,7 +386,8 @@ impl World {
                     for offset in 0..p.length as usize {
                         self.addr_to_owner[(p.start as usize + offset) % 65536] = None;
                     }
-                    self.ambient_pool += p.energy as u64; // always 0, but explicit
+                    self.ambient_pool +=
+                        p.energy as u64 + p.metabolite_a as u64 + p.metabolite_b as u64; // always 0, but explicit
                     self.free_list.free(p.start, p.length);
                     events.push(Event::Died {
                         tick: self.tick,
@@ -637,7 +642,7 @@ impl World {
             match deposit.kind {
                 ResourceKind::A => self.memory.give_energy(index as u16, actual),
                 ResourceKind::B => self.memory.give_resource_b(index as u16, actual),
-            }
+            };
             deposited += actual as u64;
         }
         self.ambient_pool -= deposited;
@@ -655,6 +660,28 @@ impl World {
     /// Number of currently live programs.
     pub fn live_count(&self) -> usize {
         self.programs.len()
+    }
+
+    /// Every configured budget unit is in exactly one reservoir.
+    pub fn accounted_budget(&self) -> u64 {
+        let organisms: u64 = self
+            .programs
+            .values()
+            .map(|p| p.energy as u64 + p.metabolite_a as u64 + p.metabolite_b as u64)
+            .sum();
+        let resource_a: u64 = self
+            .memory
+            .energy_map
+            .iter()
+            .map(|&amount| amount as u64)
+            .sum();
+        let resource_b: u64 = self
+            .memory
+            .resource_b_map
+            .iter()
+            .map(|&amount| amount as u64)
+            .sum();
+        self.ambient_pool + organisms + resource_a + resource_b
     }
 
     /// Memory utilization as fraction 0.0..=1.0
@@ -882,7 +909,9 @@ impl World {
                     self.addr_to_owner[program.start.wrapping_add(offset) as usize] = None;
                 }
                 self.free_list.free(program.start, program.length);
-                self.ambient_pool += program.energy as u64;
+                self.ambient_pool += program.energy as u64
+                    + program.metabolite_a as u64
+                    + program.metabolite_b as u64;
             }
         }
     }
@@ -966,6 +995,35 @@ mod tests {
 
         assert_eq!(world.memory.sense_energy(60_000), 0);
         assert_eq!(world.memory.sense_energy(60_017), 123);
+    }
+
+    #[test]
+    fn configured_budget_caps_seed_energy() {
+        let mut cfg = seed_config();
+        cfg.initial_energy = 500;
+        cfg.total_energy = 100;
+        let world = World::new(cfg);
+
+        assert_eq!(world.accounted_budget(), 100);
+        assert_eq!(world.programs[&0].energy, 100);
+    }
+
+    #[test]
+    fn configured_budget_is_strictly_conserved_each_tick() {
+        let mut cfg = seed_config();
+        cfg.initial_energy = 10_000;
+        cfg.mutation_rate = 0.0;
+        cfg.insertion_rate = 0.0;
+        cfg.deletion_rate = 0.0;
+        cfg.duplication_rate = 0.0;
+        cfg.tag_mutation_rate = 0.0;
+        let expected = cfg.total_energy;
+        let mut world = World::new(cfg);
+
+        for _ in 0..25_000 {
+            world.tick();
+            assert_eq!(world.accounted_budget(), expected);
+        }
     }
 
     #[test]
@@ -1382,11 +1440,8 @@ mod tests {
 
         for _ in 0..10_000 {
             world.tick();
-            let program_energy: u64 = world.programs.values().map(|p| p.energy as u64).sum();
-            let resource_a: u64 = world.memory.energy_map.iter().map(|&v| v as u64).sum();
-            let resource_b: u64 = world.memory.resource_b_map.iter().map(|&v| v as u64).sum();
             assert_eq!(
-                world.ambient_pool + program_energy + resource_a + resource_b,
+                world.accounted_budget(),
                 world.config.total_energy,
                 "energy was not conserved at tick {}",
                 world.tick

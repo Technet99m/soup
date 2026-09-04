@@ -6,8 +6,7 @@ use rand::Rng;
 #[derive(Clone)]
 pub struct Memory {
     cells: [u8; 65536],
-    /// Per-cell energy deposits. Programs can store energy here via GIVE_ENERGY
-    /// and drain it via TAKE_ENERGY. Independent of the byte instruction value.
+    /// Per-cell raw resource-A deposits, independent of instruction bytes.
     pub energy_map: Box<[u32; 65536]>,
     /// A chemically distinct resource. It has its own seek/sense/take/give opcodes.
     pub resource_b_map: Box<[u32; 65536]>,
@@ -95,19 +94,25 @@ impl Memory {
 
     /// Deposit `amount` energy at `addr`, accumulating any existing deposit.
     #[inline]
-    pub fn give_energy(&mut self, addr: u16, amount: u32) {
-        self.give_energy_from(addr, amount, None);
+    pub fn give_energy(&mut self, addr: u16, amount: u32) -> u32 {
+        self.give_energy_from(addr, amount, None)
     }
 
-    pub fn give_energy_from(&mut self, addr: u16, amount: u32, donor: Option<ProgramId>) {
+    /// Deposit as much as fits and return the accepted amount.
+    pub fn give_energy_from(&mut self, addr: u16, amount: u32, donor: Option<ProgramId>) -> u32 {
         let index = addr as usize;
+        let accepted = amount.min(u32::MAX - self.energy_map[index]);
+        if accepted == 0 {
+            return 0;
+        }
         let was_empty = self.energy_map[index] == 0;
-        self.energy_map[index] = self.energy_map[index].saturating_add(amount);
+        self.energy_map[index] += accepted;
         self.resource_a_donor[index] = if was_empty {
             donor
         } else {
             merge_donor(self.resource_a_donor[index], donor)
         };
+        accepted
     }
 
     /// Drain all deposited energy at `addr`, returning the amount taken.
@@ -117,11 +122,17 @@ impl Memory {
     }
 
     pub fn take_energy_with_donor(&mut self, addr: u16) -> (u32, Option<ProgramId>) {
+        self.take_energy_up_to(addr, u32::MAX)
+    }
+
+    pub fn take_energy_up_to(&mut self, addr: u16, limit: u32) -> (u32, Option<ProgramId>) {
         let index = addr as usize;
-        let amount = self.energy_map[index];
+        let amount = self.energy_map[index].min(limit);
         let donor = self.resource_a_donor[index];
-        self.energy_map[index] = 0;
-        self.resource_a_donor[index] = None;
+        self.energy_map[index] -= amount;
+        if self.energy_map[index] == 0 {
+            self.resource_a_donor[index] = None;
+        }
         (amount, donor)
     }
 
@@ -132,19 +143,30 @@ impl Memory {
     }
 
     #[inline]
-    pub fn give_resource_b(&mut self, addr: u16, amount: u32) {
-        self.give_resource_b_from(addr, amount, None);
+    pub fn give_resource_b(&mut self, addr: u16, amount: u32) -> u32 {
+        self.give_resource_b_from(addr, amount, None)
     }
 
-    pub fn give_resource_b_from(&mut self, addr: u16, amount: u32, donor: Option<ProgramId>) {
+    /// Deposit as much as fits and return the accepted amount.
+    pub fn give_resource_b_from(
+        &mut self,
+        addr: u16,
+        amount: u32,
+        donor: Option<ProgramId>,
+    ) -> u32 {
         let index = addr as usize;
+        let accepted = amount.min(u32::MAX - self.resource_b_map[index]);
+        if accepted == 0 {
+            return 0;
+        }
         let was_empty = self.resource_b_map[index] == 0;
-        self.resource_b_map[index] = self.resource_b_map[index].saturating_add(amount);
+        self.resource_b_map[index] += accepted;
         self.resource_b_donor[index] = if was_empty {
             donor
         } else {
             merge_donor(self.resource_b_donor[index], donor)
         };
+        accepted
     }
 
     #[inline]
@@ -153,11 +175,17 @@ impl Memory {
     }
 
     pub fn take_resource_b_with_donor(&mut self, addr: u16) -> (u32, Option<ProgramId>) {
+        self.take_resource_b_up_to(addr, u32::MAX)
+    }
+
+    pub fn take_resource_b_up_to(&mut self, addr: u16, limit: u32) -> (u32, Option<ProgramId>) {
         let index = addr as usize;
-        let amount = self.resource_b_map[index];
+        let amount = self.resource_b_map[index].min(limit);
         let donor = self.resource_b_donor[index];
-        self.resource_b_map[index] = 0;
-        self.resource_b_donor[index] = None;
+        self.resource_b_map[index] -= amount;
+        if self.resource_b_map[index] == 0 {
+            self.resource_b_donor[index] = None;
+        }
         (amount, donor)
     }
 

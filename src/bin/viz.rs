@@ -214,6 +214,20 @@ impl App {
                     format!("resource {resource:?}  #{donor_id} -> #{receiver_id}  {amount} units"),
                     ActivityKind::Relationship,
                 ),
+                Event::Metabolized {
+                    tick,
+                    id,
+                    pathway,
+                    input_a,
+                    input_b,
+                    energy_yield,
+                } => self.push_activity(
+                    tick,
+                    format!(
+                        "metabolism #{id} {pathway:?}  A:{input_a} B:{input_b} -> E:{energy_yield}"
+                    ),
+                    ActivityKind::Relationship,
+                ),
                 Event::Born {
                     tick,
                     id,
@@ -726,20 +740,25 @@ fn mnemonic(byte: u8) -> &'static str {
         25 => "ALLOC",
         26 => "BIRTH",
         27 => "SPLIT",
-        30 => "GIVE",
-        31 => "TAKE",
+        30 => "EXCRETE-A",
+        31 => "TAKE-A",
+        32 => "SENSE-A",
         33 => "SIZE",
-        35 => "HUNT",
-        36 => "DRAIN",
+        34 => "SET-RH",
+        35 => "SEEK-FOREIGN",
+        36 => "EXCRETE-A@",
         37 => "TAKE-B",
         38 => "SENSE-B",
-        39 => "GIVE-B",
+        39 => "EXCRETE-B",
         40 => "SEEK-A",
         41 => "SEEK-B",
         42 => "SET-TAG",
-        43 => "FIND-TAG",
+        43 => "SEEK-TAG",
+        44 => "CONVERT-A",
+        45 => "CONVERT-B",
+        46 => "COMBINE-AB",
         255 => "HALT",
-        44..=254 => "NOP*",
+        47..=254 => "NOP*",
         _ => "OP",
     }
 }
@@ -795,12 +814,14 @@ fn render_inspector(app: &App, frame: &mut Frame, area: Rect) {
             )),
         ]),
         Line::from(format!(
-            " @{:04x} len:{} ip:+{} age:{} E:{} tag:{:02x} A:{} B:{} RH:{:04x} WH:{:04x}",
+            " @{:04x} len:{} ip:+{} age:{} E:{} stores A:{} B:{} tag:{:02x} regs A:{} B:{} RH:{:04x} WH:{:04x}",
             program.start,
             program.length,
             program.ip_offset(),
             program.age,
             program.energy,
+            program.metabolite_a,
+            program.metabolite_b,
             program.tag,
             program.reg_a,
             program.reg_b,
@@ -810,9 +831,12 @@ fn render_inspector(app: &App, frame: &mut Frame, area: Rect) {
         Line::from(bytes),
         Line::from(ops),
         Line::from(format!(
-            " behavior  harvested A:{} B:{}  given A:{} B:{}  tag searches:{}",
+            " behavior  take A:{} B:{}  convert A:{} B:{} pairs:{}  excrete A:{} B:{}  tags:{}",
             program.trace.harvested_a,
             program.trace.harvested_b,
+            program.trace.converted_a,
+            program.trace.converted_b,
+            program.trace.combined_ab,
             program.trace.given_a,
             program.trace.given_b,
             program.trace.tag_seeks,
@@ -926,4 +950,36 @@ fn main() -> io::Result<()> {
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::mnemonic;
+
+    #[test]
+    fn metabolic_opcodes_have_explicit_display_mnemonics() {
+        let expected = [
+            (30, "EXCRETE-A"),
+            (31, "TAKE-A"),
+            (32, "SENSE-A"),
+            (33, "SIZE"),
+            (34, "SET-RH"),
+            (35, "SEEK-FOREIGN"),
+            (36, "EXCRETE-A@"),
+            (37, "TAKE-B"),
+            (38, "SENSE-B"),
+            (39, "EXCRETE-B"),
+            (40, "SEEK-A"),
+            (41, "SEEK-B"),
+            (42, "SET-TAG"),
+            (43, "SEEK-TAG"),
+            (44, "CONVERT-A"),
+            (45, "CONVERT-B"),
+            (46, "COMBINE-AB"),
+        ];
+
+        for (byte, expected_mnemonic) in expected {
+            assert_eq!(mnemonic(byte), expected_mnemonic, "opcode byte {byte}");
+        }
+    }
 }

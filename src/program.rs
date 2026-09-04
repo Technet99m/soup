@@ -3,7 +3,7 @@ use uuid::Uuid;
 
 pub type ProgramId = u32;
 
-pub const TRACE_OPCODE_COUNT: usize = 44;
+pub const TRACE_OPCODE_COUNT: usize = 47;
 
 /// A compact phenotype trace. Genomes are classified by what they execute and
 /// exchange, rather than by byte differences alone.
@@ -15,6 +15,9 @@ pub struct BehaviorTrace {
     pub harvested_b: u64,
     pub given_a: u64,
     pub given_b: u64,
+    pub converted_a: u64,
+    pub converted_b: u64,
+    pub combined_ab: u64,
     pub tag_seeks: u64,
 }
 
@@ -27,6 +30,9 @@ impl Default for BehaviorTrace {
             harvested_b: 0,
             given_a: 0,
             given_b: 0,
+            converted_a: 0,
+            converted_b: 0,
+            combined_ab: 0,
             tag_seeks: 0,
         }
     }
@@ -67,6 +73,10 @@ pub struct Program {
     pub loop_stack: ArrayVec<u16, 8>,
     /// Remaining energy. Program dies when this reaches 0.
     pub energy: u32,
+    /// Raw A retained after uptake until converted or excreted.
+    pub metabolite_a: u32,
+    /// Raw B retained after uptake until converted or excreted.
+    pub metabolite_b: u32,
     /// Number of instructions executed so far (in ticks).
     pub age: u64,
     /// Number of successful births between this organism and its startup ancestor.
@@ -108,6 +118,8 @@ impl Program {
             pending_allocation: None,
             loop_stack: ArrayVec::new(),
             energy,
+            metabolite_a: 0,
+            metabolite_b: 0,
             age: 0,
             generation: 0,
             lineage_id: Uuid::new_v4(),

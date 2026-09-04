@@ -12,7 +12,7 @@ A digital life simulation where self-replicating bytecode programs evolve inside
 - Every cell is always a valid instruction (no "invalid" states)
 - Memory is **circular** — address arithmetic wraps around
 - Programs occupy contiguous slices: `[start, start + length)`
-- A separate **program registry** maps program IDs to `{ start, length, age, energy }`
+- A separate **program registry** maps program IDs to `{ start, length, age, energy, metabolite_a, metabolite_b }`
 - Parallel **resource A** and **resource B** maps (`[u32; 65536]` each) hold deposits independently of instruction bytes. Each chemistry has distinct seek, sense, take, and give instructions.
 - External A and B deposits come from fixed or moving periodic sources. Source positions are relative to a seed-derived environmental origin and never depend on the live population or simulation RNG state.
 - A moves forward and B moves backward during decay sweeps. Source movement and counter-currents produce changing local resource conditions while conserving the combined energy budget.
@@ -55,21 +55,24 @@ Every possible byte value must map to a valid instruction. Group them:
 | 27 | `SPLIT` | Like COMMIT but immediately gives child half of remaining energy |
 | 28 | `SCAN_FWD` | Scan forward until cell == A, put found address in B |
 | 29 | `SCAN_BWD` | Scan backward until cell == A, put found address in B |
-| 30 | `GIVE_ENERGY` | Deposit register B energy from own pool into energy map at write head. Costs 1 base + energy given. |
-| 31 | `TAKE_ENERGY` | Drain all energy from energy map at read head into own pool. Costs 1 base. |
-| 32 | `SENSE_ENERGY` | Load energy map value at read head into register B (saturating at 65535). Costs 1 base. |
+| 30 | `EXCRETE_A` | Move up to register B units from the internal A store to the A map at the write head. |
+| 31 | `TAKE_RESOURCE_A` | Move the A deposit at the read head into the internal A store; it does not become energy. |
+| 32 | `SENSE_RESOURCE_A` | Load the A deposit at the read head into register B (saturating at 65535). |
 | 33 | `MEASURE_SELF` | Load this program's registered length into register A. |
 | 34 | `SET_READ_HEAD` | Set read head to register B |
 | 35 | `SEEK_FOREIGN_START` | Find memory owned by another live program |
-| 36 | `GIVE_ENERGY_IMM` | Deposit A resource at a two-byte immediate address |
-| 37 | `TAKE_RESOURCE_B` | Drain B resource at the read head into the energy pool |
+| 36 | `EXCRETE_A_IMM` | Move stored A to a two-byte immediate address |
+| 37 | `TAKE_RESOURCE_B` | Move the B deposit at the read head into the internal B store; it does not become energy. |
 | 38 | `SENSE_RESOURCE_B` | Load B resource at the read head into register B |
-| 39 | `GIVE_RESOURCE_B` | Deposit register B energy as B resource at the write head |
+| 39 | `EXCRETE_B` | Move up to register B units from the internal B store to the B map at the write head |
 | 40 | `SEEK_RESOURCE_A` | Move the read head to the nearest A deposit |
 | 41 | `SEEK_RESOURCE_B` | Move the read head to the nearest B deposit |
 | 42 | `SET_TAG` | Set the organism's recognition tag from register A |
 | 43 | `SEEK_TAG` | Find another organism whose tag matches register A |
-| 44–254 | `NOP_*` | All treated as NOP |
+| 44 | `CONVERT_A` | Convert stored A to energy, up to register B units; B=0 converts all. |
+| 45 | `CONVERT_B` | Convert stored B to energy, up to register B units; B=0 converts all. |
+| 46 | `COMBINE_AB` | Consume equal A and B amounts and yield two energy per pair; B=0 combines all possible pairs. |
+| 47–254 | `NOP_*` | All treated as NOP |
 | 255 | `HALT` | Stop execution immediately |
 
 ---
@@ -84,6 +87,8 @@ A    — general purpose / size register (u16)
 B    — address register (u16, for memory addressing)
 RH   — read head (u16)
 WH   — write head (u16)
+MA   — internal resource-A metabolite store (u32)
+MB   — internal resource-B metabolite store (u32)
 LOOP — loop stack (max depth 8)
 ```
 
@@ -98,6 +103,10 @@ LOOP — loop stack (max depth 8)
 - When energy reaches 0: program is **killed and memory freed**
 - An organism also wears out after a configurable instruction budget. This prevents sterile energy-hoarding loops from stopping generational turnover.
 - A program that successfully calls `COMMIT` passes a lineage record to the child
+- Resource uptake fills `MA` or `MB`; only the matching conversion opcode can turn that store into energy. Energy can never be relabeled as A or B.
+- `EXCRETE_A`, `EXCRETE_A_IMM`, and `EXCRETE_B` move existing metabolites back to the world. They never spend energy as product.
+- `COMMIT` and `SPLIT` transfer half of each metabolite store to the child. Death returns energy and both stores to ambient.
+- Instruction costs, uptake, conversion, combination, excretion, inheritance, decay, and rain all conserve `TOTAL_ENERGY` exactly.
 
 Energy scarcity and finite body lifetime make survival through descendants require efficient replication.
 
@@ -135,13 +144,15 @@ Substitution is applied at **write time** (when `WRITE` or `COPY` executes):
 
 ## 8. The Seed Program
 
-The simulation starts with **one hand-written 16-byte program**. It processes both resource types, measures its genome, copies that measured span, splits energy with the child, and loops:
+The simulation starts with **one hand-written 18-byte program**. It takes and converts both resource types, measures its genome, copies that measured span, splits energy and metabolites with the child, and loops:
 
 ```text
 SEEK_RESOURCE_A
-TAKE_ENERGY
+TAKE_RESOURCE_A
+CONVERT_A
 SEEK_RESOURCE_B
 TAKE_RESOURCE_B
+CONVERT_B
 MEASURE_SELF        ; A = current registered length
 ALLOC               ; find free block of that size, B = destination
 SET_WRITE_HEAD      ; WH = B
@@ -198,7 +209,9 @@ COMMITTED  { parent_id, child_id }
 - Most common instruction distribution
 - Oldest living program age (in ticks)
 - Per-organism execution counts, A/B harvests, A/B gifts, and tag searches
+- Per-organism A/B stores plus A, B, and combined conversion totals
 - Donor provenance for resources consumed by a different genome
+- `METABOLIZED` events containing the pathway, A/B inputs, and energy yield
 - Counterfactual reproductive-rate change after removing either candidate partner
 ```
 

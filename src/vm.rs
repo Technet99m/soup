@@ -1,7 +1,7 @@
 use crate::{
     allocator::FreeList,
     config::Config,
-    events::{Event, ResourceKind},
+    events::{Event, MetabolicPathway, ResourceKind},
     memory::Memory,
     opcode::Opcode,
     program::{Program, ProgramId},
@@ -282,6 +282,10 @@ pub fn step(
                 );
                 child.generation = p.generation.saturating_add(1);
                 child.tag = p.tag;
+                child.metabolite_a = p.metabolite_a / 2;
+                child.metabolite_b = p.metabolite_b / 2;
+                p.metabolite_a -= child.metabolite_a;
+                p.metabolite_b -= child.metabolite_b;
                 if child_len < allocated_len {
                     fl.free(
                         child_start.wrapping_add(child_len),
@@ -324,6 +328,10 @@ pub fn step(
                 );
                 child.generation = p.generation.saturating_add(1);
                 child.tag = p.tag;
+                child.metabolite_a = p.metabolite_a / 2;
+                child.metabolite_b = p.metabolite_b / 2;
+                p.metabolite_a -= child.metabolite_a;
+                p.metabolite_b -= child.metabolite_b;
                 if child_len < allocated_len {
                     fl.free(
                         child_start.wrapping_add(child_len),
@@ -337,24 +345,19 @@ pub fn step(
             }
         }
 
-        // --- Energy transfer ---
-        // GIVE_ENERGY: deposit reg_b energy from own pool into energy_map[wh].
-        // The deposited amount is capped at (own_energy - 1) to ensure at least
-        // 1 energy remains after the base cost is already deducted above.
-        // The base cost of 1 was already deducted, so p.energy is the remaining budget.
-        Opcode::GiveEnergy => {
-            let amount = (p.reg_b as u32).min(p.energy);
-            mem.give_energy_from(p.wh, amount, Some(p.id));
-            p.energy -= amount;
-            p.trace.given_a += amount as u64;
+        // --- Metabolite uptake, excretion, and conversion ---
+        Opcode::ExcreteA => {
+            let amount = (p.reg_b as u32).min(p.metabolite_a);
+            let deposited = mem.give_energy_from(p.wh, amount, Some(p.id));
+            p.metabolite_a -= deposited;
+            p.trace.given_a += deposited as u64;
         }
 
-        // TAKE_ENERGY: drain all energy from energy_map[rh] into own pool.
-        Opcode::TakeEnergy => {
-            let (gained, donor) = mem.take_energy_with_donor(p.rh);
-            p.energy = p.energy.saturating_add(gained);
+        Opcode::TakeResourceA => {
+            let (gained, donor) = mem.take_energy_up_to(p.rh, u32::MAX - p.metabolite_a);
+            p.metabolite_a += gained;
             p.trace.harvested_a += gained as u64;
-            if let Some(donor_id) = donor.filter(|donor_id| *donor_id != p.id) {
+            if let Some(donor_id) = donor.filter(|donor_id| gained > 0 && *donor_id != p.id) {
                 events.push(Event::ResourceTransfer {
                     tick,
                     donor_id,
@@ -365,8 +368,7 @@ pub fn step(
             }
         }
 
-        // SENSE_ENERGY: read energy_map[rh] into reg_b (saturating at u16::MAX).
-        Opcode::SenseEnergy => {
+        Opcode::SenseResourceA => {
             p.reg_b = mem.sense_energy(p.rh).min(u16::MAX as u32) as u16;
         }
 
@@ -419,25 +421,22 @@ pub fn step(
             }
         }
 
-        // GIVE_ENERGY_IMM: deposit reg_b energy from own pool into energy_map at the
-        // address encoded in the two immediate bytes following the opcode (little-endian).
-        // IP advances by 3 (opcode + lo + hi).
-        Opcode::GiveEnergyImm => {
+        Opcode::ExcreteAImm => {
             let lo = mem.read(ip.wrapping_add(1)) as u16;
             let hi = mem.read(ip.wrapping_add(2)) as u16;
             let target = lo | (hi << 8);
-            let amount = (p.reg_b as u32).min(p.energy);
-            mem.give_energy_from(target, amount, Some(p.id));
-            p.energy -= amount;
-            p.trace.given_a += amount as u64;
+            let amount = (p.reg_b as u32).min(p.metabolite_a);
+            let deposited = mem.give_energy_from(target, amount, Some(p.id));
+            p.metabolite_a -= deposited;
+            p.trace.given_a += deposited as u64;
             ip_next = ip.wrapping_add(3);
         }
 
         Opcode::TakeResourceB => {
-            let (gained, donor) = mem.take_resource_b_with_donor(p.rh);
-            p.energy = p.energy.saturating_add(gained);
+            let (gained, donor) = mem.take_resource_b_up_to(p.rh, u32::MAX - p.metabolite_b);
+            p.metabolite_b += gained;
             p.trace.harvested_b += gained as u64;
-            if let Some(donor_id) = donor.filter(|donor_id| *donor_id != p.id) {
+            if let Some(donor_id) = donor.filter(|donor_id| gained > 0 && *donor_id != p.id) {
                 events.push(Event::ResourceTransfer {
                     tick,
                     donor_id,
@@ -452,11 +451,81 @@ pub fn step(
             p.reg_b = mem.sense_resource_b(p.rh).min(u16::MAX as u32) as u16;
         }
 
-        Opcode::GiveResourceB => {
-            let amount = (p.reg_b as u32).min(p.energy);
-            mem.give_resource_b_from(p.wh, amount, Some(p.id));
-            p.energy -= amount;
-            p.trace.given_b += amount as u64;
+        Opcode::ExcreteB => {
+            let amount = (p.reg_b as u32).min(p.metabolite_b);
+            let deposited = mem.give_resource_b_from(p.wh, amount, Some(p.id));
+            p.metabolite_b -= deposited;
+            p.trace.given_b += deposited as u64;
+        }
+
+        Opcode::ConvertA => {
+            let requested = if p.reg_b == 0 {
+                p.metabolite_a
+            } else {
+                p.reg_b as u32
+            };
+            let amount = requested.min(p.metabolite_a).min(u32::MAX - p.energy);
+            p.metabolite_a -= amount;
+            p.energy += amount;
+            p.trace.converted_a += amount as u64;
+            if amount > 0 {
+                events.push(Event::Metabolized {
+                    tick,
+                    id: p.id,
+                    pathway: MetabolicPathway::A,
+                    input_a: amount,
+                    input_b: 0,
+                    energy_yield: amount,
+                });
+            }
+        }
+
+        Opcode::ConvertB => {
+            let requested = if p.reg_b == 0 {
+                p.metabolite_b
+            } else {
+                p.reg_b as u32
+            };
+            let amount = requested.min(p.metabolite_b).min(u32::MAX - p.energy);
+            p.metabolite_b -= amount;
+            p.energy += amount;
+            p.trace.converted_b += amount as u64;
+            if amount > 0 {
+                events.push(Event::Metabolized {
+                    tick,
+                    id: p.id,
+                    pathway: MetabolicPathway::B,
+                    input_a: 0,
+                    input_b: amount,
+                    energy_yield: amount,
+                });
+            }
+        }
+
+        Opcode::CombineAB => {
+            let requested = if p.reg_b == 0 {
+                p.metabolite_a.min(p.metabolite_b)
+            } else {
+                p.reg_b as u32
+            };
+            let pairs = requested
+                .min(p.metabolite_a)
+                .min(p.metabolite_b)
+                .min((u32::MAX - p.energy) / 2);
+            p.metabolite_a -= pairs;
+            p.metabolite_b -= pairs;
+            p.energy += pairs * 2;
+            p.trace.combined_ab += pairs as u64;
+            if pairs > 0 {
+                events.push(Event::Metabolized {
+                    tick,
+                    id: p.id,
+                    pathway: MetabolicPathway::Combined,
+                    input_a: pairs,
+                    input_b: pairs,
+                    energy_yield: pairs * 2,
+                });
+            }
         }
 
         Opcode::SeekResourceA => {
@@ -764,12 +833,13 @@ mod tests {
     }
 
     #[test]
-    fn give_energy_deposits_and_costs() {
+    fn excrete_a_uses_only_stored_metabolite() {
         // LOAD_IMM(12) 50, SWAP(17) — put 50 into reg_b
-        // GIVE_ENERGY(30) — deposit reg_b=50 at wh=0
+        // EXCRETE_A(30) — deposit reg_b=50 from metabolite A at wh=0
         // HALT(255)
         let code = [12u8, 50, 17, 30, 255];
         let (mut p, mut mem, mut fl) = make_program(&code, 500);
+        p.metabolite_a = 50;
         let cfg = Config::default();
         let mut next_id: ProgramId = 100;
         let mut rng = StdRng::seed_from_u64(0);
@@ -797,14 +867,15 @@ mod tests {
         assert_eq!(p.reg_b, 50);
         // energy_map at wh=0 should have 50 deposited
         assert_eq!(mem.sense_energy(0), 50);
-        // program paid: 4 base costs (4 instructions before HALT) + 50 deposited
-        assert_eq!(p.energy, 500 - 4 - 50);
+        assert_eq!(p.metabolite_a, 0);
+        // Excretion moves metabolite rather than relabeling energy.
+        assert_eq!(p.energy, 500 - 4);
     }
 
     #[test]
-    fn take_energy_absorbs_deposit() {
-        // Pre-deposit 200 energy at address 0 in memory
-        // TAKE_ENERGY(31) — rh=0 by default, drains energy_map[0]
+    fn take_resource_a_stores_deposit_without_creating_energy() {
+        // Pre-deposit 200 resource A at address 0 in memory
+        // TAKE_RESOURCE_A(31) — rh=0 by default, drains resource A into its store
         // HALT(255)
         let code = [31u8, 255];
         let (mut p, mut mem, mut fl) = make_program(&code, 100);
@@ -832,8 +903,8 @@ mod tests {
                 _ => break,
             }
         }
-        // 100 - 1 (TAKE_ENERGY base) + 200 (absorbed) - 1 (HALT base)
-        assert_eq!(p.energy, 298);
+        assert_eq!(p.energy, 98);
+        assert_eq!(p.metabolite_a, 200);
         assert_eq!(mem.sense_energy(0), 0);
     }
 
@@ -894,16 +965,64 @@ mod tests {
             0,
             &mut ambient,
         );
-        assert_eq!(p.energy, 299);
+        assert_eq!(
+            p.energy, 99,
+            "uptake must not become energy without conversion"
+        );
+        assert_eq!(p.metabolite_b, 200);
         assert_eq!(p.trace.harvested_b, 200);
         assert_eq!(mem.sense_resource_b(0), 0);
     }
 
     #[test]
-    fn cross_organism_harvest_emits_transfer_provenance() {
-        let code = [37u8, 255];
+    fn convert_a_only_uses_the_a_metabolite_store() {
+        let code = [44u8];
         let (mut p, mut mem, mut fl) = make_program(&code, 100);
-        mem.give_resource_b_from(0, 200, Some(2));
+        p.metabolite_a = 40;
+        p.metabolite_b = 70;
+        let cfg = Config::default();
+        let mut next_id = 100;
+        let mut rng = StdRng::seed_from_u64(0);
+        let mut events = Vec::new();
+        let mut ambient = 0;
+
+        let _ = step(
+            &mut p,
+            &mut mem,
+            &mut fl,
+            &NO_OWNERS,
+            &NO_TAGS,
+            &cfg,
+            &mut next_id,
+            &mut rng,
+            &mut events,
+            3,
+            &mut ambient,
+        );
+
+        assert_eq!(p.energy, 139);
+        assert_eq!(p.metabolite_a, 0);
+        assert_eq!(p.metabolite_b, 70);
+        assert_eq!(p.trace.converted_a, 40);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            Event::Metabolized {
+                tick: 3,
+                id: 1,
+                pathway: MetabolicPathway::A,
+                input_a: 40,
+                input_b: 0,
+                energy_yield: 40,
+            }
+        )));
+    }
+
+    #[test]
+    fn combine_ab_consumes_equal_nonfungible_inputs() {
+        let code = [46u8];
+        let (mut p, mut mem, mut fl) = make_program(&code, 10);
+        p.metabolite_a = 7;
+        p.metabolite_b = 3;
         let cfg = Config::default();
         let mut next_id = 100;
         let mut rng = StdRng::seed_from_u64(0);
@@ -919,10 +1038,65 @@ mod tests {
             &mut next_id,
             &mut rng,
             &mut events,
-            9,
+            4,
             &mut ambient,
         );
+        assert_eq!(p.energy, 15);
+        assert_eq!(p.metabolite_a, 4);
+        assert_eq!(p.metabolite_b, 0);
+        assert_eq!(p.trace.combined_ab, 3);
+    }
+    #[test]
+    fn cross_feeding_excretes_uptakes_and_converts_b() {
+        let cfg = Config::default();
+        let mut next_id = 100;
+        let mut rng = StdRng::seed_from_u64(0);
+        let mut events = Vec::new();
+        let mut ambient = 0;
 
+        let (mut donor, mut mem, mut donor_fl) = make_program(&[39u8], 100);
+        donor.id = 2;
+        donor.reg_b = 200;
+        donor.metabolite_b = 200;
+        let _ = step(
+            &mut donor,
+            &mut mem,
+            &mut donor_fl,
+            &NO_OWNERS,
+            &NO_TAGS,
+            &cfg,
+            &mut next_id,
+            &mut rng,
+            &mut events,
+            8,
+            &mut ambient,
+        );
+        assert_eq!(donor.metabolite_b, 0);
+        assert_eq!(mem.sense_resource_b(0), 200);
+
+        mem.place(10, &[37u8, 45]);
+        let mut receiver_fl = FreeList::new(12, 65524);
+        let mut receiver = Program::new(1, 10, 2, 100, None, None, None);
+        receiver.rh = 0;
+        for tick in 9..=10 {
+            let _ = step(
+                &mut receiver,
+                &mut mem,
+                &mut receiver_fl,
+                &NO_OWNERS,
+                &NO_TAGS,
+                &cfg,
+                &mut next_id,
+                &mut rng,
+                &mut events,
+                tick,
+                &mut ambient,
+            );
+        }
+
+        assert_eq!(receiver.energy, 298);
+        assert_eq!(receiver.metabolite_b, 0);
+        assert_eq!(receiver.trace.converted_b, 200);
         assert!(events.iter().any(|event| matches!(
             event,
             Event::ResourceTransfer {
@@ -1027,6 +1201,8 @@ mod tests {
         // Flow: MEASURE_SELF, DEC, ALLOC, COMMIT
         let code = [33u8, 16, 25, 26, 255];
         let (mut p, mut mem, mut fl) = make_program_with_length(&code, 300, 1_000);
+        p.metabolite_a = 10;
+        p.metabolite_b = 21;
         let cfg = Config::default();
         let mut next_id: ProgramId = 100;
         let mut rng = StdRng::seed_from_u64(0);
@@ -1059,6 +1235,10 @@ mod tests {
                 assert_eq!(child.length, 299);
                 assert_eq!(child.start, p.reg_b);
                 assert!(child.length > 255);
+                assert_eq!(child.metabolite_a, 5);
+                assert_eq!(child.metabolite_b, 10);
+                assert_eq!(p.metabolite_a, 5);
+                assert_eq!(p.metabolite_b, 11);
             }
             other => panic!("expected Spawned, got {other:?}"),
         }
