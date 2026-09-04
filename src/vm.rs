@@ -36,6 +36,7 @@ pub fn step(
     p: &mut Program,
     mem: &mut Memory,
     fl: &mut FreeList,
+    addr_to_owner: &[Option<ProgramId>],
     cfg: &Config,
     next_id: &mut ProgramId,
     rng: &mut impl Rng,
@@ -86,6 +87,18 @@ pub fn step(
         Opcode::Read => p.reg_a = mem.read(p.rh) as u16,
 
         Opcode::Write => {
+            if cfg.foreign_write_tracking {
+                if let Some(victim_id) = addr_to_owner[p.wh as usize] {
+                    if victim_id != p.id {
+                        events.push(Event::ForeignWrite {
+                            tick,
+                            attacker_id: p.id,
+                            victim_id,
+                            address: p.wh,
+                        });
+                    }
+                }
+            }
             let (stored, mutated) = mem.write_mutating(p.wh, (p.reg_a & 0xFF) as u8, rng, cfg.mutation_rate);
             if mutated {
                 events.push(Event::Mutated {
@@ -99,6 +112,18 @@ pub fn step(
 
         // COPY: copy mem[RH] → mem[WH], then advance both heads by 1.
         Opcode::Copy => {
+            if cfg.foreign_write_tracking {
+                if let Some(victim_id) = addr_to_owner[p.wh as usize] {
+                    if victim_id != p.id {
+                        events.push(Event::ForeignWrite {
+                            tick,
+                            attacker_id: p.id,
+                            victim_id,
+                            address: p.wh,
+                        });
+                    }
+                }
+            }
             let (original, stored) = mem.copy_cell_mutating(p.rh, p.wh, rng, cfg.mutation_rate);
             if stored != original {
                 events.push(Event::Mutated {
@@ -329,6 +354,36 @@ pub fn step(
             }
         }
 
+        // SET_READ_HEAD: RH = reg_b. Mirror of SetWriteHead.
+        Opcode::SetReadHead => p.rh = p.reg_b,
+
+        // SEEK_FOREIGN_START: scan circularly from RH for the nearest address owned
+        // by a different live program. Sets reg_b to that address if found.
+        Opcode::SeekForeignStart => {
+            for i in 0..65536u32 {
+                let addr = p.rh.wrapping_add(i as u16);
+                if let Some(owner) = addr_to_owner[addr as usize] {
+                    if owner != p.id {
+                        p.reg_b = addr;
+                        break;
+                    }
+                }
+            }
+        }
+
+        // GIVE_ENERGY_IMM: deposit reg_b energy from own pool into energy_map at the
+        // address encoded in the two immediate bytes following the opcode (little-endian).
+        // IP advances by 3 (opcode + lo + hi).
+        Opcode::GiveEnergyImm => {
+            let lo = mem.read(ip.wrapping_add(1)) as u16;
+            let hi = mem.read(ip.wrapping_add(2)) as u16;
+            let target = lo | (hi << 8);
+            let amount = (p.reg_b as u32).min(p.energy);
+            mem.give_energy(target, amount);
+            p.energy -= amount;
+            ip_next = ip.wrapping_add(3);
+        }
+
         // --- Halt ---
         Opcode::Halt => {
             p.ip = ip_next;
@@ -348,6 +403,9 @@ mod tests {
     use crate::seed::SEED;
     use rand::SeedableRng;
     use rand::rngs::StdRng;
+
+    /// Empty ownership map used in tests that don't exercise foreign-ownership opcodes.
+    const NO_OWNERS: [Option<ProgramId>; 65536] = [None; 65536];
 
     /// Build a minimal test environment: place `code` at address 0, free list starts
     /// immediately after, and create a Program whose start/length match the code slice.
@@ -377,7 +435,7 @@ mod tests {
         let mut events = Vec::new();
         let mut ambient = 0u64;
         for _ in 0..1_000_000 {
-            last = step(&mut p, &mut mem, &mut fl, &cfg, &mut next_id, &mut rng, &mut events, 0, &mut ambient);
+            last = step(&mut p, &mut mem, &mut fl, &NO_OWNERS, &cfg, &mut next_id, &mut rng, &mut events, 0, &mut ambient);
             match last {
                 StepResult::Continue => {}
                 _ => break,
@@ -444,7 +502,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(0);
         let mut events = Vec::new();
         let mut ambient = 0u64;
-        let _ = step(&mut p2, &mut mem2, &mut fl2, &cfg, &mut next_id, &mut rng, &mut events, 0, &mut ambient);
+        let _ = step(&mut p2, &mut mem2, &mut fl2, &NO_OWNERS, &cfg, &mut next_id, &mut rng, &mut events, 0, &mut ambient);
         assert_eq!(p2.reg_a, 0);
     }
 
@@ -503,7 +561,7 @@ mod tests {
         let mut ambient = 0u64;
         let mut result = StepResult::Continue;
         for _ in 0..10_000 {
-            result = step(&mut p, &mut mem, &mut fl, &cfg, &mut next_id, &mut rng, &mut events, 0, &mut ambient);
+            result = step(&mut p, &mut mem, &mut fl, &NO_OWNERS, &cfg, &mut next_id, &mut rng, &mut events, 0, &mut ambient);
             match result {
                 StepResult::Continue => {}
                 _ => break,
@@ -541,7 +599,7 @@ mod tests {
         let mut events = Vec::new();
         let mut ambient = 0u64;
         for _ in 0..100 {
-            match step(&mut p, &mut mem, &mut fl, &cfg, &mut next_id, &mut rng, &mut events, 0, &mut ambient) {
+            match step(&mut p, &mut mem, &mut fl, &NO_OWNERS, &cfg, &mut next_id, &mut rng, &mut events, 0, &mut ambient) {
                 StepResult::Continue => {}
                 _ => break,
             }
@@ -568,7 +626,7 @@ mod tests {
         let mut events = Vec::new();
         let mut ambient = 0u64;
         for _ in 0..100 {
-            match step(&mut p, &mut mem, &mut fl, &cfg, &mut next_id, &mut rng, &mut events, 0, &mut ambient) {
+            match step(&mut p, &mut mem, &mut fl, &NO_OWNERS, &cfg, &mut next_id, &mut rng, &mut events, 0, &mut ambient) {
                 StepResult::Continue => {}
                 _ => break,
             }
@@ -590,7 +648,7 @@ mod tests {
         let mut events = Vec::new();
         let mut ambient = 0u64;
         for _ in 0..100 {
-            match step(&mut p, &mut mem, &mut fl, &cfg, &mut next_id, &mut rng, &mut events, 0, &mut ambient) {
+            match step(&mut p, &mut mem, &mut fl, &NO_OWNERS, &cfg, &mut next_id, &mut rng, &mut events, 0, &mut ambient) {
                 StepResult::Continue => {}
                 _ => break,
             }
@@ -626,7 +684,7 @@ mod tests {
         let mut events = Vec::new();
         let mut ambient = 0u64;
         loop {
-            match step(&mut p, &mut mem, &mut fl, &cfg, &mut next_id, &mut rng, &mut events, 0, &mut ambient) {
+            match step(&mut p, &mut mem, &mut fl, &NO_OWNERS, &cfg, &mut next_id, &mut rng, &mut events, 0, &mut ambient) {
                 StepResult::Continue => {}
                 _ => break,
             }
@@ -657,7 +715,7 @@ mod tests {
 
         let mut result = StepResult::Continue;
         for _ in 0..1_000 {
-            result = step(&mut p, &mut mem, &mut fl, &cfg, &mut next_id, &mut rng, &mut events, 0, &mut ambient);
+            result = step(&mut p, &mut mem, &mut fl, &NO_OWNERS, &cfg, &mut next_id, &mut rng, &mut events, 0, &mut ambient);
             if !matches!(result, StepResult::Continue) {
                 break;
             }

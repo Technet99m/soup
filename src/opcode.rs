@@ -37,6 +37,14 @@ pub enum Opcode {
     /// Load min(energy_map[rh], 65535) into reg_b. Costs 1 base.
     SenseEnergy,
     MeasureSelf,
+    /// Set read head to reg_b. Mirror of SetWriteHead.
+    SetReadHead,
+    /// Find nearest memory owned by a different live program (circular from RH).
+    /// Sets reg_b to that address. If none found, reg_b unchanged.
+    SeekForeignStart,
+    /// Deposit reg_b energy from own pool into energy_map at a 2-byte immediate address.
+    /// IP advances by 3 (opcode + 2 address bytes).
+    GiveEnergyImm,
     Halt,
 }
 
@@ -77,6 +85,9 @@ impl From<u8> for Opcode {
             31  => Self::TakeEnergy,
             32  => Self::SenseEnergy,
             33  => Self::MeasureSelf,
+            34  => Self::SetReadHead,
+            35  => Self::SeekForeignStart,
+            36  => Self::GiveEnergyImm,
             255 => Self::Halt,
             _   => Self::Nop,
         }
@@ -119,8 +130,11 @@ impl From<Opcode> for u8 {
             Opcode::GiveEnergy    => 30,
             Opcode::TakeEnergy    => 31,
             Opcode::SenseEnergy   => 32,
-            Opcode::MeasureSelf   => 33,
-            Opcode::Halt          => 255,
+            Opcode::MeasureSelf      => 33,
+            Opcode::SetReadHead      => 34,
+            Opcode::SeekForeignStart => 35,
+            Opcode::GiveEnergyImm    => 36,
+            Opcode::Halt             => 255,
         }
     }
 }
@@ -160,7 +174,7 @@ mod tests {
 
     #[test]
     fn nop_range_decodes_as_nop() {
-        for b in 34u8..=254 {
+        for b in 37u8..=254 {
             assert_eq!(Opcode::from(b), Opcode::Nop, "byte {b} should be Nop");
         }
     }

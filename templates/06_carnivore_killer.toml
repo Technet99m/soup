@@ -1,0 +1,12 @@
+name = "carnivore_killer"
+description = "Injection predator: repeatedly finds the nearest foreign program and overwrites the first byte of its body with HALT (0xFF). Victim halts when its IP reaches that byte, returning its energy to the ambient pool."
+# 8 bytes:
+# [0]  SEEK_FOREIGN_START (35) — reg_b = nearest foreign-owned address
+# [1]  SET_WRITE_HEAD     (11) — WH = reg_b (victim body)
+# [2]  LOAD_IMM           (12)
+# [3]  255                     — reg_a = HALT opcode
+# [4]  WRITE              (9)  — mem[WH] = HALT
+# [5]  LOAD_IMM           (12)
+# [6]  8                       — reg_a = 8 (jump offset)
+# [7]  JMP_BWD            (20) — ip_next = (7+1) - 8 = 0  → loop forever
+bytes = [35, 11, 12, 255, 9, 12, 8, 20]

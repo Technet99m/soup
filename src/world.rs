@@ -1,5 +1,5 @@
 use std::collections::{HashMap, VecDeque};
-use rand::{SeedableRng, rngs::StdRng};
+use rand::{Rng, SeedableRng, rngs::StdRng};
 use crate::{
     allocator::FreeList,
     config::Config,
@@ -27,6 +27,9 @@ pub struct World {
     /// Burns from instruction execution return here; drip deposits from here to the
     /// energy map; deaths return remaining program energy here.
     pub ambient_pool: u64,
+    /// Per-cell ownership map: addr_to_owner[addr] = Some(id) if a live program owns that byte.
+    /// Kept in sync on spawn and death; used by SeekForeignStart and ForeignExec tracking.
+    pub addr_to_owner: Box<[Option<ProgramId>]>,
 }
 
 /// Build a FreeList covering all memory NOT occupied by the given placements.
@@ -65,19 +68,39 @@ fn make_free_list(total: u32, placements: &[(u16, u16)]) -> FreeList {
 }
 
 impl World {
-    /// Create a new World, loading templates and placing each at evenly spaced addresses.
+    /// Create a new World, loading templates and placing each at random addresses.
     pub fn new(config: Config) -> Self {
         let templates = template::load_templates(&config.templates_dir);
         let num = templates.len();
-        let stride = 65536u32 / num as u32;
+        let mut startup_rng = rand::thread_rng();
 
         let mut memory = Memory::new();
         let mut placements: Vec<(u16, u16)> = Vec::with_capacity(num);
+        let mut free_ranges: Vec<(u32, u32)> = vec![(0, 65536)];
 
-        for (i, tmpl) in templates.iter().enumerate() {
-            let addr = (i as u32 * stride) as u16;
+        for tmpl in templates.iter() {
+            let len = tmpl.bytes.len() as u32;
+            let fitting: Vec<usize> = free_ranges
+                .iter()
+                .enumerate()
+                .filter_map(|(i, (start, end))| (end - start >= len).then_some(i))
+                .collect();
+            let chosen_idx = fitting[startup_rng.gen_range(0..fitting.len())];
+            let (range_start, range_end) = free_ranges.remove(chosen_idx);
+            let start = startup_rng.gen_range(range_start..=range_end - len);
+            let end = start + len;
+
+            if range_start < start {
+                free_ranges.push((range_start, start));
+            }
+            if end < range_end {
+                free_ranges.push((end, range_end));
+            }
+
+            let addr = start as u16;
+            let plen = len as u16;
             memory.place(addr, &tmpl.bytes);
-            placements.push((addr, tmpl.bytes.len() as u16));
+            placements.push((addr, plen));
         }
 
         let free_list = make_free_list(65536, &placements);
@@ -104,6 +127,14 @@ impl World {
         let seed_energy: u64 = programs.values().map(|p| p.energy as u64).sum();
         let ambient_pool = config.total_energy.saturating_sub(seed_energy);
 
+        let mut addr_to_owner: Box<[Option<ProgramId>]> = vec![None; 65536].into_boxed_slice();
+        for prog in programs.values() {
+            for offset in 0..prog.length as usize {
+                let addr = (prog.start as usize + offset) % 65536;
+                addr_to_owner[addr] = Some(prog.id);
+            }
+        }
+
         World {
             memory,
             free_list,
@@ -115,6 +146,7 @@ impl World {
             next_id: num as ProgramId,
             template_names,
             ambient_pool,
+            addr_to_owner,
         }
     }
 
@@ -156,9 +188,24 @@ impl World {
             }
         };
 
+        // Emit ForeignExec if this program is about to execute code owned by another program.
+        if self.config.foreign_exec_tracking {
+            let ip = self.programs[&id].ip;
+            if let Some(owner) = self.addr_to_owner[ip as usize] {
+                if owner != id {
+                    events.push(crate::events::Event::ForeignExec {
+                        tick: self.tick,
+                        id,
+                        ip,
+                        owner_id: owner,
+                    });
+                }
+            }
+        }
+
         let result = {
             let p = self.programs.get_mut(&id).unwrap();
-            vm::step(p, &mut self.memory, &mut self.free_list, &self.config, &mut self.next_id, &mut self.rng, &mut events, self.tick, &mut self.ambient_pool)
+            vm::step(p, &mut self.memory, &mut self.free_list, &self.addr_to_owner, &self.config, &mut self.next_id, &mut self.rng, &mut events, self.tick, &mut self.ambient_pool)
         };
 
         match result {
@@ -168,6 +215,9 @@ impl World {
             StepResult::Halted => {
                 // Program executed HALT — return remaining energy to ambient, free memory.
                 if let Some(p) = self.programs.remove(&id) {
+                    for offset in 0..p.length as usize {
+                        self.addr_to_owner[(p.start as usize + offset) % 65536] = None;
+                    }
                     self.ambient_pool += p.energy as u64;
                     self.free_list.free(p.start, p.length);
                     events.push(Event::Died {
@@ -180,6 +230,9 @@ impl World {
             StepResult::OutOfEnergy => {
                 // Energy is 0 (all burned to ambient via step()); nothing to return.
                 if let Some(p) = self.programs.remove(&id) {
+                    for offset in 0..p.length as usize {
+                        self.addr_to_owner[(p.start as usize + offset) % 65536] = None;
+                    }
                     self.ambient_pool += p.energy as u64; // always 0, but explicit
                     self.free_list.free(p.start, p.length);
                     events.push(Event::Died {
@@ -208,6 +261,9 @@ impl World {
                     child_id: child.id,
                 });
                 let child_id = child.id;
+                for offset in 0..child.length as usize {
+                    self.addr_to_owner[(child.start as usize + offset) % 65536] = Some(child_id);
+                }
                 self.programs.insert(child_id, *child);
                 self.queue.push_back(child_id);
                 self.queue.push_back(id);

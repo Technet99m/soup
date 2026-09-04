@@ -38,6 +38,20 @@ pub enum Event {
         parent_id: ProgramId,
         child_id: ProgramId,
     },
+    /// A program executed an instruction from memory owned by a different program.
+    ForeignExec {
+        tick: u64,
+        id: ProgramId,
+        ip: u16,
+        owner_id: ProgramId,
+    },
+    /// A program wrote to memory owned by a different program.
+    ForeignWrite {
+        tick: u64,
+        attacker_id: ProgramId,
+        victim_id: ProgramId,
+        address: u16,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

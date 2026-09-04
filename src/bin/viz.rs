@@ -18,18 +18,6 @@ use ratatui::{
 };
 use soup::{config::Config, world::World};
 
-/// Color palette for program-ID coloring: index 0 = free, 1–7 = program colors (cycle by ID).
-const PALETTE: [Color; 8] = [
-    Color::DarkGray,
-    Color::Cyan,
-    Color::Green,
-    Color::Yellow,
-    Color::Magenta,
-    Color::Blue,
-    Color::Red,
-    Color::White,
-];
-
 /// Separate fixed palette for lineage/origin coloring: index 0 = no template, 1–7 = template colors.
 const ORIGIN_PALETTE: [Color; 8] = [
     Color::DarkGray,
@@ -42,10 +30,6 @@ const ORIGIN_PALETTE: [Color; 8] = [
     Color::White,
 ];
 
-fn program_color(id: u32) -> Color {
-    PALETTE[(id as usize % 7) + 1]
-}
-
 fn origin_color(template_id: Option<u8>) -> Color {
     match template_id {
         None => ORIGIN_PALETTE[0],
@@ -55,7 +39,6 @@ fn origin_color(template_id: Option<u8>) -> Color {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum DisplayMode {
-    Programs,
     Energy,
     Origins,
 }
@@ -63,15 +46,13 @@ enum DisplayMode {
 impl DisplayMode {
     fn next(self) -> Self {
         match self {
-            Self::Programs => Self::Energy,
             Self::Energy => Self::Origins,
-            Self::Origins => Self::Programs,
+            Self::Origins => Self::Energy,
         }
     }
 
     fn label(self) -> &'static str {
         match self {
-            Self::Programs => "programs",
             Self::Energy => "energy",
             Self::Origins => "origins",
         }
@@ -97,7 +78,7 @@ impl App {
             steps_per_frame: 100,
             table_state,
             selected_id: None,
-            display_mode: DisplayMode::Programs,
+            display_mode: DisplayMode::Origins,
         }
     }
 
@@ -144,20 +125,6 @@ impl App {
         self.table_state.select(Some(prev));
         self.selected_id = self.sorted_ids().get(prev).copied();
     }
-}
-
-/// Build a 65536-element array mapping each byte address to a PALETTE index.
-fn build_color_map(world: &World) -> Box<[u8; 65536]> {
-    let mut map = Box::new([0u8; 65536]);
-    let mut programs: Vec<_> = world.programs.values().collect();
-    programs.sort_unstable_by_key(|p| p.id);
-    for p in programs {
-        let cidx = (p.id % 7 + 1) as u8;
-        for i in 0..p.length {
-            map[p.start.wrapping_add(i) as usize] = cidx;
-        }
-    }
-    map
 }
 
 /// Build a 65536-element array mapping each byte address to an ORIGIN_PALETTE index.
@@ -231,7 +198,6 @@ fn render_memory(app: &App, frame: &mut Frame, area: Rect) {
     };
 
     let cmap = match mode {
-        DisplayMode::Programs => Some(build_color_map(world)),
         DisplayMode::Origins  => Some(build_origins_map(world)),
         DisplayMode::Energy   => None,
     };
@@ -256,8 +222,8 @@ fn render_memory(app: &App, frame: &mut Frame, area: Rect) {
                         None    => ("\u{00B7}", Color::DarkGray),
                     }
                 }
-                DisplayMode::Programs | DisplayMode::Origins => {
-                    let palette = if mode == DisplayMode::Programs { &PALETTE } else { &ORIGIN_PALETTE };
+                DisplayMode::Origins => {
+                    let palette = &ORIGIN_PALETTE;
                     let map = cmap.as_ref().unwrap();
                     let mut counts = [0u16; 8];
                     for addr in addr_start..addr_end {
@@ -306,7 +272,7 @@ fn render_program_list(app: &mut App, frame: &mut Frame, area: Rect) {
                 "\u{2591}".repeat(10 - filled),
                 pct
             );
-            let color = program_color(id);
+            let color = origin_color(p.template_id);
 
             let tmpl_label = match p.template_id {
                 Some(tid) => app.world.template_names
@@ -482,7 +448,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) -> i
                     // Keep 'e' as shortcut for toggling energy overlay
                     KeyCode::Char('e') => {
                         app.display_mode = match app.display_mode {
-                            DisplayMode::Energy => DisplayMode::Programs,
+                            DisplayMode::Energy => DisplayMode::Origins,
                             _ => DisplayMode::Energy,
                         };
                     }

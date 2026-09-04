@@ -24,6 +24,10 @@ pub struct Config {
     pub ambient_drip_interval: u64,
     /// Energy deposited to a random cell per drip event. Default: 500.
     pub ambient_drip_amount: u32,
+    /// Emit ForeignExec events when a program's IP is in another program's region. Default: true.
+    pub foreign_exec_tracking: bool,
+    /// Emit ForeignWrite events when a program writes to another program's region. Default: false.
+    pub foreign_write_tracking: bool,
     #[serde(skip)]
     pub log_path: PathBuf,
     /// Directory containing `*.toml` template files. Default: "templates".
@@ -49,6 +53,8 @@ impl Default for Config {
             child_energy: 500,
             ambient_drip_interval: 10,
             ambient_drip_amount: 500,
+            foreign_exec_tracking: true,
+            foreign_write_tracking: false,
             log_path: PathBuf::from("soup.log"),
             templates_dir: PathBuf::from("templates"),
         }
@@ -80,6 +86,8 @@ impl Config {
                 c.child_energy = file_cfg.child_energy;
                 c.ambient_drip_interval = file_cfg.ambient_drip_interval;
                 c.ambient_drip_amount = file_cfg.ambient_drip_amount;
+                c.foreign_exec_tracking = file_cfg.foreign_exec_tracking;
+                c.foreign_write_tracking = file_cfg.foreign_write_tracking;
             }
         }
 
@@ -106,6 +114,8 @@ impl Config {
         parse_env!(child_energy,          "CHILD_ENERGY");
         parse_env!(ambient_drip_interval, "AMBIENT_DRIP_INTERVAL");
         parse_env!(ambient_drip_amount,   "AMBIENT_DRIP_AMOUNT");
+        parse_env!(foreign_exec_tracking,  "FOREIGN_EXEC_TRACKING");
+        parse_env!(foreign_write_tracking, "FOREIGN_WRITE_TRACKING");
         if let Ok(v) = std::env::var("LOG_PATH") {
             c.log_path = PathBuf::from(v);
         }
