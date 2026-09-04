@@ -1,12 +1,39 @@
-use crate::{identity::HeritableIdentity, world::{SymbiosisReport, World}};
+use crate::{
+    identity::HeritableIdentity,
+    world::{SymbiosisReport, World},
+};
 use std::{
+    collections::VecDeque,
+    fmt, io,
+    panic::{catch_unwind, AssertUnwindSafe},
     sync::{
         atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver, Sender, TryRecvError},
-        Arc,
+        Arc, Once,
     },
     thread::{self, JoinHandle},
 };
+
+thread_local! {
+    static SANITIZE_WORKER_PANICS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn install_worker_panic_filter() {
+    static INSTALL_FILTER: Once = Once::new();
+    INSTALL_FILTER.call_once(|| {
+        let previous_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |panic_info| {
+            let sanitize = SANITIZE_WORKER_PANICS.with(std::cell::Cell::get);
+            if !sanitize {
+                previous_hook(panic_info);
+            }
+        }));
+    });
+}
+
+fn mark_worker_thread_for_sanitized_panics() {
+    SANITIZE_WORKER_PANICS.with(|sanitize| sanitize.set(true));
+}
 
 /// An isolated world state and candidate pair captured before a trial starts.
 /// The worker owns this value, so subsequent TUI ticks cannot affect the run.
@@ -69,11 +96,35 @@ pub enum TrialEvent {
         heritable_identity_a: HeritableIdentity,
         heritable_identity_b: HeritableIdentity,
     },
+    Failed {
+        source_tick: u64,
+        heritable_identity_a: HeritableIdentity,
+        heritable_identity_b: HeritableIdentity,
+        reason: TrialFailureReason,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrialFailureReason {
+    WorkerStartupFailed,
+    WorkerPanicked,
+    ChannelDisconnected,
+}
+
+impl fmt::Display for TrialFailureReason {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::WorkerStartupFailed => "worker could not be started",
+            Self::WorkerPanicked => "worker stopped unexpectedly",
+            Self::ChannelDisconnected => "worker event channel disconnected",
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrialStartError {
     AlreadyRunning,
+    StartupFailed,
 }
 
 #[derive(Default)]
@@ -139,6 +190,8 @@ enum TrialRunResult {
 }
 
 struct ActiveTrial {
+    source_tick: u64,
+    heritable_identity_pair: (HeritableIdentity, HeritableIdentity),
     cancellation: Arc<Cancellation>,
     events: Receiver<TrialEvent>,
     handle: JoinHandle<()>,
@@ -148,6 +201,7 @@ struct ActiveTrial {
 pub struct TrialWorker {
     active: Option<ActiveTrial>,
     progress: Option<TrialProgress>,
+    pending: VecDeque<TrialEvent>,
 }
 
 impl TrialWorker {
@@ -180,6 +234,29 @@ impl TrialWorker {
     where
         F: FnOnce(TrialSnapshot, u64, TrialReporter) -> TrialRunResult + Send + 'static,
     {
+        self.start_with_spawner(
+            snapshot,
+            horizon,
+            |job| {
+                thread::Builder::new()
+                    .name("counterfactual-trial".into())
+                    .spawn(job)
+            },
+            run,
+        )
+    }
+
+    fn start_with_spawner<F, S>(
+        &mut self,
+        snapshot: TrialSnapshot,
+        horizon: u64,
+        spawn: S,
+        run: F,
+    ) -> Result<(), TrialStartError>
+    where
+        F: FnOnce(TrialSnapshot, u64, TrialReporter) -> TrialRunResult + Send + 'static,
+        S: FnOnce(Box<dyn FnOnce() + Send + 'static>) -> io::Result<JoinHandle<()>>,
+    {
         if self.active.is_some() {
             return Err(TrialStartError::AlreadyRunning);
         }
@@ -189,29 +266,49 @@ impl TrialWorker {
         let worker_cancellation = Arc::clone(&cancellation);
         let (event_tx, event_rx) = mpsc::channel();
         let terminal_tx = event_tx.clone();
-        let handle = thread::Builder::new()
-            .name("counterfactual-trial".into())
-            .spawn(move || {
-                let reporter = TrialReporter {
+        install_worker_panic_filter();
+        let job = Box::new(move || {
+            // The spawner contract dedicates this thread to this worker. Keep the
+            // filter set through thread exit so even a raw JoinHandle panic is quiet.
+            mark_worker_thread_for_sanitized_panics();
+            let reporter = TrialReporter {
+                source_tick,
+                heritable_identity_pair,
+                events: event_tx,
+                cancellation: worker_cancellation,
+            };
+            let terminal = match catch_unwind(AssertUnwindSafe(|| run(snapshot, horizon, reporter)))
+            {
+                Ok(TrialRunResult::Completed(report)) => TrialEvent::Completed {
                     source_tick,
-                    heritable_identity_pair,
-                    events: event_tx,
-                    cancellation: worker_cancellation,
-                };
-                let terminal = match run(snapshot, horizon, reporter) {
-                    TrialRunResult::Completed(report) => TrialEvent::Completed {
-                        source_tick,
-                        report,
-                    },
-                    TrialRunResult::Cancelled => TrialEvent::Cancelled {
-                        source_tick,
-                        heritable_identity_a: heritable_identity_pair.0,
-                        heritable_identity_b: heritable_identity_pair.1,
-                    },
-                };
-                let _ = terminal_tx.send(terminal);
-            })
-            .expect("failed to start counterfactual worker");
+                    report,
+                },
+                Ok(TrialRunResult::Cancelled) => TrialEvent::Cancelled {
+                    source_tick,
+                    heritable_identity_a: heritable_identity_pair.0,
+                    heritable_identity_b: heritable_identity_pair.1,
+                },
+                Err(_) => TrialEvent::Failed {
+                    source_tick,
+                    heritable_identity_a: heritable_identity_pair.0,
+                    heritable_identity_b: heritable_identity_pair.1,
+                    reason: TrialFailureReason::WorkerPanicked,
+                },
+            };
+            let _ = terminal_tx.send(terminal);
+        });
+        let handle = match spawn(job) {
+            Ok(handle) => handle,
+            Err(_) => {
+                self.pending.push_back(TrialEvent::Failed {
+                    source_tick,
+                    heritable_identity_a: heritable_identity_pair.0,
+                    heritable_identity_b: heritable_identity_pair.1,
+                    reason: TrialFailureReason::WorkerStartupFailed,
+                });
+                return Err(TrialStartError::StartupFailed);
+            }
+        };
         self.progress = Some(TrialProgress {
             source_tick,
             heritable_identity_a: heritable_identity_pair.0,
@@ -220,6 +317,8 @@ impl TrialWorker {
             total: horizon,
         });
         self.active = Some(ActiveTrial {
+            source_tick,
+            heritable_identity_pair,
             cancellation,
             events: event_rx,
             handle,
@@ -244,15 +343,18 @@ impl TrialWorker {
     }
 
     pub fn poll(&mut self) -> Vec<TrialEvent> {
-        let mut received = Vec::new();
+        let mut received: Vec<_> = self.pending.drain(..).collect();
         let mut finished = false;
+        let mut disconnected = false;
         if let Some(active) = &self.active {
             loop {
                 match active.events.try_recv() {
                     Ok(event) => {
                         match &event {
                             TrialEvent::Progress(progress) => self.progress = Some(*progress),
-                            TrialEvent::Completed { .. } | TrialEvent::Cancelled { .. } => {
+                            TrialEvent::Completed { .. }
+                            | TrialEvent::Cancelled { .. }
+                            | TrialEvent::Failed { .. } => {
                                 finished = true;
                             }
                         }
@@ -264,35 +366,96 @@ impl TrialWorker {
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => {
                         finished = true;
+                        disconnected = true;
                         break;
                     }
                 }
             }
         }
         if finished {
-            self.join_active();
+            let metadata = self
+                .active
+                .as_ref()
+                .map(|active| (active.source_tick, active.heritable_identity_pair));
+            if let Some(failure) = self.join_active() {
+                received.retain(|event| matches!(event, TrialEvent::Progress(_)));
+                received.push(failure);
+            } else if disconnected {
+                let (source_tick, heritable_identity_pair) =
+                    metadata.expect("finished trial metadata");
+                received.push(TrialEvent::Failed {
+                    source_tick,
+                    heritable_identity_a: heritable_identity_pair.0,
+                    heritable_identity_b: heritable_identity_pair.1,
+                    reason: TrialFailureReason::ChannelDisconnected,
+                });
+            }
         }
         received
     }
 
-    pub fn cancel_and_join(&mut self) {
-        if let Some(active) = &self.active {
-            active.cancellation.cancel();
-        }
-        self.join_active();
-    }
-
-    fn join_active(&mut self) {
-        if let Some(active) = self.active.take() {
-            let _ = active.handle.join();
+    pub fn cancel_and_join(&mut self) -> Vec<TrialEvent> {
+        let mut failures: Vec<_> = self
+            .pending
+            .drain(..)
+            .filter(|event| matches!(event, TrialEvent::Failed { .. }))
+            .collect();
+        let Some(active) = self.active.take() else {
+            self.progress = None;
+            return failures;
+        };
+        active.cancellation.cancel();
+        let source_tick = active.source_tick;
+        let heritable_identity_pair = active.heritable_identity_pair;
+        let join_failed = active.handle.join().is_err();
+        let terminal_events: Vec<_> = active
+            .events
+            .try_iter()
+            .filter(|event| !matches!(event, TrialEvent::Progress(_)))
+            .collect();
+        let active_failure = if join_failed {
+            Some(TrialFailureReason::WorkerPanicked)
+        } else if terminal_events.is_empty() {
+            Some(TrialFailureReason::ChannelDisconnected)
+        } else {
+            terminal_events.iter().find_map(|event| match event {
+                TrialEvent::Failed { reason, .. } => Some(*reason),
+                _ => None,
+            })
+        };
+        if let Some(reason) = active_failure {
+            failures.push(TrialEvent::Failed {
+                source_tick,
+                heritable_identity_a: heritable_identity_pair.0,
+                heritable_identity_b: heritable_identity_pair.1,
+                reason,
+            });
         }
         self.progress = None;
+        failures
+    }
+
+    fn join_active(&mut self) -> Option<TrialEvent> {
+        let failure = self.active.take().and_then(|active| {
+            active.handle.join().err().map(|_| TrialEvent::Failed {
+                source_tick: active.source_tick,
+                heritable_identity_a: active.heritable_identity_pair.0,
+                heritable_identity_b: active.heritable_identity_pair.1,
+                reason: TrialFailureReason::WorkerPanicked,
+            })
+        });
+        self.progress = None;
+        failure
     }
 }
 
 impl Drop for TrialWorker {
     fn drop(&mut self) {
-        self.cancel_and_join();
+        for event in self.cancel_and_join() {
+            if let TrialEvent::Failed { reason, .. } = event {
+                eprintln!("counterfactual failed: {reason}");
+            }
+        }
     }
 }
 
@@ -303,7 +466,7 @@ mod tests {
         config::Config,
         world::{RelationshipVerdict, SymbiosisReport},
     };
-    use std::{path::PathBuf, sync::mpsc};
+    use std::{io, path::PathBuf, sync::mpsc};
 
     fn world_at(tick: u64) -> crate::world::World {
         let mut world = crate::world::World::new(Config {
@@ -314,22 +477,36 @@ mod tests {
         world
     }
 
+    fn identity(genome: u64) -> HeritableIdentity {
+        HeritableIdentity {
+            genome,
+            tag: genome as u8,
+        }
+    }
+
+    fn pair(a: u64, b: u64) -> (HeritableIdentity, HeritableIdentity) {
+        (identity(a), identity(b))
+    }
+
     #[test]
     fn snapshot_is_immutable_and_records_source_tick_and_pair() {
         let mut live_world = world_at(41);
-        let snapshot = TrialSnapshot::from_pair(&live_world, (0xaaa, 0xbbb));
+        let snapshot = TrialSnapshot::from_pair(&live_world, pair(0xaaa, 0xbbb));
         live_world.tick = 99;
 
         assert_eq!(snapshot.source_tick(), 41);
-        assert_eq!(snapshot.genome_pair(), (0xaaa, 0xbbb));
+        assert_eq!(snapshot.heritable_identity_pair(), pair(0xaaa, 0xbbb));
         assert_eq!(snapshot.world().tick, 41);
         assert_eq!(live_world.tick, 99);
     }
 
-    fn report(pair: (u64, u64), horizon: u64) -> SymbiosisReport {
+    fn report(
+        pair: (HeritableIdentity, HeritableIdentity),
+        horizon: u64,
+    ) -> SymbiosisReport {
         SymbiosisReport {
-            genome_a: pair.0,
-            genome_b: pair.1,
+            heritable_identity_a: pair.0,
+            heritable_identity_b: pair.1,
             horizon,
             baseline_births_a: 3,
             baseline_births_b: 4,
@@ -353,7 +530,7 @@ mod tests {
 
     #[test]
     fn worker_delivers_progress_and_result_with_snapshot_metadata() {
-        let snapshot = TrialSnapshot::from_pair(&world_at(7), (0x123, 0x456));
+        let snapshot = TrialSnapshot::from_pair(&world_at(7), pair(0x123, 0x456));
         let mut worker = TrialWorker::default();
         let (done_tx, done_rx) = mpsc::channel();
 
@@ -361,7 +538,7 @@ mod tests {
             .start_with(snapshot, 10, move |snapshot, horizon, reporter| {
                 reporter.progress(4, horizon);
                 done_tx.send(()).unwrap();
-                TrialRunResult::Completed(report(snapshot.genome_pair(), horizon))
+                TrialRunResult::Completed(report(snapshot.heritable_identity_pair(), horizon))
             })
             .unwrap();
         done_rx.recv().unwrap();
@@ -372,11 +549,12 @@ mod tests {
             event,
             TrialEvent::Progress(TrialProgress {
                 source_tick: 7,
-                genome_a: 0x123,
-                genome_b: 0x456,
+                heritable_identity_a,
+                heritable_identity_b,
                 completed: 4,
                 total: 10,
-            })
+            }) if *heritable_identity_a == identity(0x123)
+                && *heritable_identity_b == identity(0x456)
         )));
         let completed = events
             .iter()
@@ -389,15 +567,15 @@ mod tests {
             })
             .expect("completed result");
         assert_eq!(completed.0, 7);
-        assert_eq!(completed.1.genome_a, 0x123);
-        assert_eq!(completed.1.genome_b, 0x456);
+        assert_eq!(completed.1.heritable_identity_a, identity(0x123));
+        assert_eq!(completed.1.heritable_identity_b, identity(0x456));
         assert_eq!(completed.1.horizon, 10);
         assert!(!worker.is_running());
     }
 
     #[test]
     fn cancellation_stops_the_active_trial() {
-        let snapshot = TrialSnapshot::from_pair(&world_at(8), (1, 2));
+        let snapshot = TrialSnapshot::from_pair(&world_at(8), pair(1, 2));
         let mut worker = TrialWorker::default();
         let (started_tx, started_rx) = mpsc::channel();
         let (continue_tx, continue_rx) = mpsc::channel();
@@ -436,7 +614,7 @@ mod tests {
         let (release_tx, release_rx) = mpsc::channel();
         worker
             .start_with(
-                TrialSnapshot::from_pair(&world_at(1), (1, 2)),
+                TrialSnapshot::from_pair(&world_at(1), pair(1, 2)),
                 10,
                 move |_, _, reporter| {
                     started_tx.send(()).unwrap();
@@ -453,10 +631,10 @@ mod tests {
 
         let error = worker
             .start_with(
-                TrialSnapshot::from_pair(&world_at(2), (3, 4)),
+                TrialSnapshot::from_pair(&world_at(2), pair(3, 4)),
                 10,
                 |snapshot, horizon, _| {
-                    TrialRunResult::Completed(report(snapshot.genome_pair(), horizon))
+                    TrialRunResult::Completed(report(snapshot.heritable_identity_pair(), horizon))
                 },
             )
             .unwrap_err();
@@ -464,7 +642,7 @@ mod tests {
 
         worker.cancel();
         release_tx.send(()).unwrap();
-        worker.cancel_and_join();
+        let _ = worker.cancel_and_join();
     }
 
     #[test]
@@ -474,7 +652,7 @@ mod tests {
         let mut worker = TrialWorker::default();
         worker
             .start_with(
-                TrialSnapshot::from_pair(&world_at(3), (5, 6)),
+                TrialSnapshot::from_pair(&world_at(3), pair(5, 6)),
                 10,
                 move |_, _, reporter| {
                     started_tx.send(()).unwrap();
@@ -489,5 +667,201 @@ mod tests {
         drop(worker);
 
         stopped_rx.recv().unwrap();
+    }
+
+    #[test]
+    fn task_panic_becomes_a_sanitized_terminal_failure() {
+        let mut worker = TrialWorker::default();
+        worker
+            .start_with(
+                TrialSnapshot::from_pair(&world_at(12), pair(0xaaa, 0xbbb)),
+                10,
+                |_, _, _| panic!("sensitive panic payload"),
+            )
+            .unwrap();
+        wait_until_finished(&worker);
+
+        let events = worker.poll();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            TrialEvent::Failed {
+                source_tick: 12,
+                heritable_identity_a,
+                heritable_identity_b,
+                reason: TrialFailureReason::WorkerPanicked,
+            } if *heritable_identity_a == identity(0xaaa)
+                && *heritable_identity_b == identity(0xbbb)
+        )));
+        assert!(!format!("{events:?}").contains("sensitive panic payload"));
+        assert!(!worker.is_running());
+    }
+
+    #[test]
+    fn disconnected_event_channel_becomes_a_terminal_failure() {
+        let mut worker = TrialWorker::default();
+        worker
+            .start_with_spawner(
+                TrialSnapshot::from_pair(&world_at(13), pair(1, 2)),
+                10,
+                |_job| Ok(std::thread::spawn(|| {})),
+                |snapshot, horizon, _| {
+                    TrialRunResult::Completed(report(snapshot.heritable_identity_pair(), horizon))
+                },
+            )
+            .unwrap();
+        wait_until_finished(&worker);
+
+        assert!(worker.poll().iter().any(|event| matches!(
+            event,
+            TrialEvent::Failed {
+                source_tick: 13,
+                reason: TrialFailureReason::ChannelDisconnected,
+                ..
+            }
+        )));
+        assert!(!worker.is_running());
+    }
+
+    #[test]
+    fn spawn_failure_becomes_a_terminal_failure_without_panicking() {
+        let mut worker = TrialWorker::default();
+        let result = worker.start_with_spawner(
+            TrialSnapshot::from_pair(&world_at(14), pair(3, 4)),
+            10,
+            |_job| Err::<JoinHandle<()>, _>(io::Error::other("sensitive operating system detail")),
+            |snapshot, horizon, _| {
+                TrialRunResult::Completed(report(snapshot.heritable_identity_pair(), horizon))
+            },
+        );
+
+        assert_eq!(result, Err(TrialStartError::StartupFailed));
+        let events = worker.poll();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            TrialEvent::Failed {
+                source_tick: 14,
+                heritable_identity_a,
+                heritable_identity_b,
+                reason: TrialFailureReason::WorkerStartupFailed,
+            } if *heritable_identity_a == identity(3)
+                && *heritable_identity_b == identity(4)
+        )));
+        assert!(!format!("{events:?}").contains("sensitive operating system detail"));
+        assert!(!worker.is_running());
+    }
+
+    #[test]
+    fn cancel_and_join_returns_a_pending_worker_failure() {
+        let mut worker = TrialWorker::default();
+        worker
+            .start_with(
+                TrialSnapshot::from_pair(&world_at(15), pair(5, 6)),
+                10,
+                |_, _, _| panic!("task failed before shutdown"),
+            )
+            .unwrap();
+        wait_until_finished(&worker);
+
+        let failures = worker.cancel_and_join();
+        assert_eq!(failures.len(), 1);
+        assert!(matches!(
+            failures.as_slice(),
+            [TrialEvent::Failed {
+                source_tick: 15,
+                reason: TrialFailureReason::WorkerPanicked,
+                ..
+            }]
+        ));
+        assert!(!worker.is_running());
+    }
+
+    #[test]
+    fn cleanup_returns_a_pending_startup_failure() {
+        let mut worker = TrialWorker::default();
+        let result = worker.start_with_spawner(
+            TrialSnapshot::from_pair(&world_at(16), pair(7, 8)),
+            10,
+            |_job| Err::<JoinHandle<()>, _>(io::Error::other("private OS detail")),
+            |snapshot, horizon, _| {
+                TrialRunResult::Completed(report(snapshot.heritable_identity_pair(), horizon))
+            },
+        );
+        assert_eq!(result, Err(TrialStartError::StartupFailed));
+
+        assert!(matches!(
+            worker.cancel_and_join().as_slice(),
+            [TrialEvent::Failed {
+                source_tick: 16,
+                reason: TrialFailureReason::WorkerStartupFailed,
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn cleanup_reports_a_disconnected_event_channel() {
+        let mut worker = TrialWorker::default();
+        worker
+            .start_with_spawner(
+                TrialSnapshot::from_pair(&world_at(17), pair(9, 10)),
+                10,
+                |_job| Ok(std::thread::spawn(|| {})),
+                |snapshot, horizon, _| {
+                    TrialRunResult::Completed(report(snapshot.heritable_identity_pair(), horizon))
+                },
+            )
+            .unwrap();
+        wait_until_finished(&worker);
+
+        assert!(matches!(
+            worker.cancel_and_join().as_slice(),
+            [TrialEvent::Failed {
+                source_tick: 17,
+                reason: TrialFailureReason::ChannelDisconnected,
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn join_handle_panic_replaces_an_already_sent_terminal_result_with_failure() {
+        let mut worker = TrialWorker::default();
+        worker
+            .start_with_spawner(
+                TrialSnapshot::from_pair(&world_at(15), pair(5, 6)),
+                10,
+                |job| {
+                    Ok(std::thread::spawn(move || {
+                        job();
+                        panic!("panic outside the guarded task boundary");
+                    }))
+                },
+                |snapshot, horizon, _| {
+                    TrialRunResult::Completed(report(snapshot.heritable_identity_pair(), horizon))
+                },
+            )
+            .unwrap();
+        wait_until_finished(&worker);
+
+        let events = worker.poll();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| !matches!(event, TrialEvent::Progress(_)))
+                .count(),
+            1
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            TrialEvent::Failed {
+                source_tick: 15,
+                reason: TrialFailureReason::WorkerPanicked,
+                ..
+            }
+        )));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, TrialEvent::Completed { .. })));
+        assert!(!worker.is_running());
     }
 }
