@@ -1,4 +1,7 @@
-use crate::{identity::HeritableIdentity, program::ProgramId};
+use crate::{
+    identity::{EcotypeIdentity, HeritableIdentity},
+    program::ProgramId,
+};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -24,6 +27,16 @@ pub enum Event {
         generation: u32,
         /// The child's byte genome plus recognition tag at birth.
         heritable_identity: HeritableIdentity,
+    },
+    /// Emitted once, only after behavior has persisted and reproduced through
+    /// the configured number of stable descendant generations.
+    NewProgram {
+        tick: u64,
+        ecotype_identity: EcotypeIdentity,
+        equivalent_raw_genomes: usize,
+        persistence_ticks: u64,
+        reproductive_output: u64,
+        descendant_generations: u32,
     },
     Died {
         tick: u64,
