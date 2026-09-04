@@ -1,4 +1,4 @@
-use crate::{identity::HeritableIdentity, program::ProgramId};
+use crate::{identity::HeritableIdentity, mutation, program::ProgramId};
 use rand::Rng;
 use std::collections::BTreeMap;
 
@@ -125,7 +125,7 @@ impl Memory {
         mutation_rate: f64,
     ) -> (u8, bool) {
         let stored = if rng.gen::<f64>() < mutation_rate {
-            rng.gen::<u8>()
+            mutation::substitute(value, rng.gen::<u8>())
         } else {
             value
         };

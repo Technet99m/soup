@@ -4,6 +4,7 @@ pub mod event_log;
 pub mod events;
 pub mod identity;
 pub mod memory;
+pub mod mutation;
 pub mod opcode;
 pub mod program;
 pub mod seed;

@@ -9,7 +9,8 @@ The redesign gives evolution room to change more than byte values:
 - offspring usually occupy memory beside their parent, allowing persistent local ecologies;
 - A and B resources come from organism-independent fixed or moving sources, flow in opposite currents, occupy separate internal stores, require different uptake/conversion/excretion instructions, and can only be found locally;
 - a heritable, mutable tag can be set and searched for by programs;
-- execution traces classify what a genome actually does, not merely how its bytes differ;
+- execution traces classify what a genome actually does, aggregating redundant raw opcode aliases under one decoded instruction while exact byte genomes remain distinct;
+- all 256 bytes use a balanced redundant opcode encoding, and substitutions move through a documented local synonymous/adjacent-instruction kernel rather than an overwhelmingly NOP basin;
 - suspected partnerships can be tested in cloned worlds with either partner removed.
 
 Run the live evolution observer:

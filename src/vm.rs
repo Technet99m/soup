@@ -58,7 +58,7 @@ pub fn step(
     let raw_opcode = mem.read(p.ip);
     let executing_heritable_identity = HeritableIdentity::new(genome_hash(mem, p), p.tag);
     let opcode = Opcode::from(raw_opcode);
-    p.trace.record(raw_opcode);
+    p.trace.record(opcode);
     let ip = p.ip;
     // Default: advance IP by 1.  Individual opcodes may override ip_next.
     let mut ip_next = ip.wrapping_add(1);
@@ -697,6 +697,26 @@ mod tests {
         assert!(matches!(result, StepResult::Halted));
         assert_eq!(p.age, 2); // NOP + HALT each increment age
         assert_eq!(p.energy, 8); // 10 - 1 (NOP) - 1 (HALT) = 8
+    }
+
+    #[test]
+    fn behavior_trace_aggregates_opcode_aliases_while_raw_genomes_differ() {
+        let (canonical, canonical_memory, _) = run_to_end(&[1, 255], 10);
+        let (alias, alias_memory, _) = run_to_end(&[48, 94], 10);
+
+        assert_eq!(canonical.trace.opcode_counts, alias.trace.opcode_counts);
+        assert_eq!(
+            canonical.trace.opcode_counts[Opcode::MovFwd.index() as usize],
+            1
+        );
+        assert_eq!(
+            canonical.trace.opcode_counts[Opcode::Halt.index() as usize],
+            1
+        );
+        assert_ne!(
+            canonical_memory.read_slice(0, 2),
+            alias_memory.read_slice(0, 2)
+        );
     }
 
     #[test]

@@ -72,8 +72,10 @@ Every possible byte value must map to a valid instruction. Group them:
 | 44 | `CONVERT_A` | Convert stored A to energy, up to register B units; B=0 converts all. |
 | 45 | `CONVERT_B` | Convert stored B to energy, up to register B units; B=0 converts all. |
 | 46 | `COMBINE_AB` | Consume equal A and B amounts and yield two energy per pair; B=0 combines all possible pairs. |
-| 47–254 | `NOP_*` | All treated as NOP |
+| 47–254 | aliases | Decode with instruction index `(byte - 47) mod 48`, where indices 0–46 are the canonical rows above and index 47 is `HALT`. |
 | 255 | `HALT` | Stop execution immediately |
+
+The named bytes 0–46 and 255 are canonical and retain their historical semantics. Converting an instruction back to a byte always returns that canonical encoding, so the shipped ancestor and templates require no migration. Bytes 47–254 provide four complete extra passes over the 48-instruction alphabet plus a fifth pass for indices 0–15. Consequently, every phenotype has five or six encodings (at most 2.34% of the alphabet), including `NOP`; every non-NOP instruction has multiple synonymous raw genotypes. All 256 input bytes decode without rejection.
 
 ---
 
@@ -126,12 +128,20 @@ Energy scarcity and finite body lifetime make survival through descendants requi
 
 Substitution is applied at **write time** (when `WRITE` or `COPY` executes):
 
-- **0.5% chance per byte written** of flipping the written value to a random u8
-- Mutation rate is a **configurable global parameter**
+- The configurable mutation-rate draw decides whether mutation occurs. If it does, one uniformly sampled mutation-choice byte drives a pure local kernel.
+- For an even choice, the result is another encoding of the same decoded instruction. Encodings are ordered by raw byte after excluding the source; `(choice >> 1) mod synonym_count` selects one, so the stored raw byte always changes while behavior is synonymous.
+- For an odd choice, bit 1 selects the preceding or following **non-NOP** instruction in canonical opcode order (wrapping between `MOV_FWD` and `HALT`), and `choice >> 2` selects one of its raw aliases. A NOP source enters the same functional ring at one of those endpoints.
+- Thus the complete one-step neighborhood of every functional encoding contains both changed-byte synonyms and non-NOP functional neighbors. It cannot fall into NOP from a functional source.
+- At birth, an insertion position is chosen as before and one uniformly sampled choice byte is inserted unchanged. Since the complete raw alphabet is balanced, this reaches each genotype once without recreating a dominant NOP outcome. Deletion and duplication continue to operate on raw spans.
+- The kernel receives only the source byte and mutation-choice byte. It never receives or inspects viability, lineage, fitness, intended behavior, or world state; there is no post-mutation filtering.
+- Both mappings are pure, so a fixed mutation-choice stream replays byte-for-byte under the same event schedule and RNG seed.
+- Mutation rate is a **configurable global parameter**.
 - At birth, independent configurable rates insert one byte, delete a 1–8 byte span, or duplicate a 1–8 byte span.
 - `COMMIT` and `SPLIT` copy the parent's current recognition tag to the child before birth mutation.
 - A child's inherited recognition tag can mutate independently at birth according to `TAG_MUTATION_RATE`; a triggered mutation always chooses a different tag.
 - `SET_TAG` changes only the executing organism's current tag. Existing deposits and emitted lineage events retain their earlier snapshots.
+
+Behavior traces increment the canonical decoded instruction index, so synonymous opcode bytes aggregate into the same phenotype counters. Genome hashes and mutation events continue to use raw bytes, preserving genotype identity.
 
 ---
 
