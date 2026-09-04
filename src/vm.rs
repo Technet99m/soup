@@ -378,7 +378,9 @@ pub fn step(
 
         // --- Metabolite uptake, excretion, and conversion ---
         Opcode::ExcreteA => {
-            let amount = (p.reg_b as u32).min(p.metabolite_a);
+            let amount = (p.reg_b as u32)
+                .min(p.metabolite_a)
+                .min(cfg.max_resource_flux_per_instruction);
             let origin = ResourceOrigin::new(p.id, executing_heritable_identity);
             let deposited = mem.give_energy_from(p.wh, amount, Some(origin));
             p.metabolite_a -= deposited;
@@ -386,7 +388,9 @@ pub fn step(
         }
 
         Opcode::TakeResourceA => {
-            let (gained, provenance) = mem.take_energy_up_to(p.rh, u32::MAX - p.metabolite_a);
+            let capacity = u32::MAX - p.metabolite_a;
+            let (gained, provenance) =
+                mem.take_energy_up_to(p.rh, capacity.min(cfg.max_resource_flux_per_instruction));
             p.metabolite_a += gained;
             p.trace.harvested_a += gained as u64;
             for (origin, amount) in provenance
@@ -462,7 +466,9 @@ pub fn step(
             let lo = mem.read(ip.wrapping_add(1)) as u16;
             let hi = mem.read(ip.wrapping_add(2)) as u16;
             let target = lo | (hi << 8);
-            let amount = (p.reg_b as u32).min(p.metabolite_a);
+            let amount = (p.reg_b as u32)
+                .min(p.metabolite_a)
+                .min(cfg.max_resource_flux_per_instruction);
             let origin = ResourceOrigin::new(p.id, executing_heritable_identity);
             let deposited = mem.give_energy_from(target, amount, Some(origin));
             p.metabolite_a -= deposited;
@@ -471,7 +477,9 @@ pub fn step(
         }
 
         Opcode::TakeResourceB => {
-            let (gained, provenance) = mem.take_resource_b_up_to(p.rh, u32::MAX - p.metabolite_b);
+            let capacity = u32::MAX - p.metabolite_b;
+            let (gained, provenance) = mem
+                .take_resource_b_up_to(p.rh, capacity.min(cfg.max_resource_flux_per_instruction));
             p.metabolite_b += gained;
             p.trace.harvested_b += gained as u64;
             for (origin, amount) in provenance
@@ -495,7 +503,9 @@ pub fn step(
         }
 
         Opcode::ExcreteB => {
-            let amount = (p.reg_b as u32).min(p.metabolite_b);
+            let amount = (p.reg_b as u32)
+                .min(p.metabolite_b)
+                .min(cfg.max_resource_flux_per_instruction);
             let origin = ResourceOrigin::new(p.id, executing_heritable_identity);
             let deposited = mem.give_resource_b_from(p.wh, amount, Some(origin));
             p.metabolite_b -= deposited;
@@ -504,11 +514,14 @@ pub fn step(
 
         Opcode::ConvertA => {
             let requested = if p.reg_b == 0 {
-                p.metabolite_a
+                cfg.max_metabolism_per_instruction
             } else {
                 p.reg_b as u32
             };
-            let amount = requested.min(p.metabolite_a).min(u32::MAX - p.energy);
+            let amount = requested
+                .min(cfg.max_metabolism_per_instruction)
+                .min(p.metabolite_a)
+                .min(u32::MAX - p.energy);
             p.metabolite_a -= amount;
             p.energy += amount;
             p.trace.converted_a += amount as u64;
@@ -526,11 +539,14 @@ pub fn step(
 
         Opcode::ConvertB => {
             let requested = if p.reg_b == 0 {
-                p.metabolite_b
+                cfg.max_metabolism_per_instruction
             } else {
                 p.reg_b as u32
             };
-            let amount = requested.min(p.metabolite_b).min(u32::MAX - p.energy);
+            let amount = requested
+                .min(cfg.max_metabolism_per_instruction)
+                .min(p.metabolite_b)
+                .min(u32::MAX - p.energy);
             p.metabolite_b -= amount;
             p.energy += amount;
             p.trace.converted_b += amount as u64;
@@ -548,11 +564,12 @@ pub fn step(
 
         Opcode::CombineAB => {
             let requested = if p.reg_b == 0 {
-                p.metabolite_a.min(p.metabolite_b)
+                cfg.max_metabolism_per_instruction
             } else {
                 p.reg_b as u32
             };
             let pairs = requested
+                .min(cfg.max_metabolism_per_instruction)
                 .min(p.metabolite_a)
                 .min(p.metabolite_b)
                 .min((u32::MAX - p.energy) / 2);
@@ -682,6 +699,33 @@ mod tests {
         let fl = FreeList::new(tracked_len, 0u16.wrapping_sub(tracked_len));
         let p = Program::new(1, 0, tracked_len, energy, None, None, None);
         (p, mem, fl)
+    }
+
+    fn step_once(
+        p: &mut Program,
+        mem: &mut Memory,
+        fl: &mut FreeList,
+        cfg: &Config,
+        tick: u64,
+    ) -> (Vec<Event>, u64) {
+        let mut next_id = 100;
+        let mut rng = StdRng::seed_from_u64(0);
+        let mut events = Vec::new();
+        let mut ambient = 0;
+        let _ = step(
+            p,
+            mem,
+            fl,
+            &NO_OWNERS,
+            &NO_TAGS,
+            cfg,
+            &mut next_id,
+            &mut rng,
+            &mut events,
+            tick,
+            &mut ambient,
+        );
+        (events, ambient)
     }
 
     /// Run a program until it stops (Halted, OutOfEnergy, or iteration limit).
@@ -982,6 +1026,123 @@ mod tests {
     }
 
     #[test]
+    fn uptake_is_bounded_in_deterministic_chunks_with_exact_provenance_events() {
+        let (mut p, mut mem, mut fl) = make_program(&[31], 100);
+        p.rh = 100;
+        let donor_identity = HeritableIdentity::new(0x1234, 7);
+        let donor = ResourceOrigin::new(9, donor_identity);
+        assert_eq!(mem.give_energy_from(100, 200, Some(donor)), 200);
+        let cfg = Config {
+            max_resource_flux_per_instruction: 17,
+            ..Config::default()
+        };
+
+        let (first_events, _) = step_once(&mut p, &mut mem, &mut fl, &cfg, 5);
+        assert_eq!(p.metabolite_a, 17);
+        assert_eq!(mem.sense_energy(100), 183);
+        assert_eq!(mem.resource_a_provenance[100].amount_for(donor), 183);
+        assert!(matches!(
+            first_events.as_slice(),
+            [Event::ResourceTransfer {
+                tick: 5,
+                donor_id: 9,
+                donor_heritable_identity,
+                receiver_id: 1,
+                resource: ResourceKind::A,
+                amount: 17,
+                ..
+            }] if *donor_heritable_identity == donor_identity
+        ));
+
+        p.ip = 0;
+        let (second_events, _) = step_once(&mut p, &mut mem, &mut fl, &cfg, 6);
+        assert_eq!(p.metabolite_a, 34);
+        assert_eq!(mem.sense_energy(100), 166);
+        assert_eq!(mem.resource_a_provenance[100].amount_for(donor), 166);
+        assert!(matches!(
+            second_events.as_slice(),
+            [Event::ResourceTransfer { amount: 17, .. }]
+        ));
+    }
+
+    #[test]
+    fn resource_flux_limit_applies_identically_to_b_uptake_and_all_excretion() {
+        let cfg = Config {
+            max_resource_flux_per_instruction: 17,
+            ..Config::default()
+        };
+
+        let (mut taker, mut take_mem, mut take_fl) = make_program(&[37], 100);
+        taker.rh = 100;
+        take_mem.give_resource_b(100, 200);
+        step_once(&mut taker, &mut take_mem, &mut take_fl, &cfg, 0);
+        assert_eq!(taker.metabolite_b, 17);
+        assert_eq!(take_mem.sense_resource_b(100), 183);
+
+        let (mut a, mut a_mem, mut a_fl) = make_program(&[30], 100);
+        a.reg_b = 100;
+        a.metabolite_a = 80;
+        a_mem.give_energy(100, u32::MAX - 9);
+        a.wh = 100;
+        step_once(&mut a, &mut a_mem, &mut a_fl, &cfg, 0);
+        assert_eq!(a.metabolite_a, 71);
+        assert_eq!(a.trace.given_a, 9);
+        assert_eq!(a_mem.sense_energy(100), u32::MAX);
+        assert_eq!(a_mem.resource_a_provenance[100].total(), u32::MAX);
+
+        let (mut a_imm, mut imm_mem, mut imm_fl) = make_program(&[36, 100, 0], 100);
+        a_imm.reg_b = 100;
+        a_imm.metabolite_a = 80;
+        step_once(&mut a_imm, &mut imm_mem, &mut imm_fl, &cfg, 0);
+        assert_eq!(a_imm.metabolite_a, 63);
+        assert_eq!(a_imm.trace.given_a, 17);
+        assert_eq!(imm_mem.sense_energy(100), 17);
+
+        let (mut b, mut b_mem, mut b_fl) = make_program(&[39], 100);
+        b.reg_b = 100;
+        b.metabolite_b = 80;
+        b.wh = 100;
+        step_once(&mut b, &mut b_mem, &mut b_fl, &cfg, 0);
+        assert_eq!(b.metabolite_b, 63);
+        assert_eq!(b.trace.given_b, 17);
+        assert_eq!(b_mem.sense_resource_b(100), 17);
+    }
+
+    #[test]
+    fn uptake_respects_near_max_store_capacity_without_losing_budget() {
+        let cfg = Config {
+            max_resource_flux_per_instruction: 17,
+            ..Config::default()
+        };
+        for opcode in [31, 37] {
+            let (mut p, mut mem, mut fl) = make_program(&[opcode], 100);
+            p.rh = 100;
+            if opcode == 31 {
+                p.metabolite_a = u32::MAX - 5;
+                mem.give_energy(100, 200);
+            } else {
+                p.metabolite_b = u32::MAX - 5;
+                mem.give_resource_b(100, 200);
+            }
+            let before = p.energy as u64
+                + p.metabolite_a as u64
+                + p.metabolite_b as u64
+                + mem.sense_energy(100) as u64
+                + mem.sense_resource_b(100) as u64;
+            let (_, ambient) = step_once(&mut p, &mut mem, &mut fl, &cfg, 0);
+            assert_eq!(p.metabolite_a.max(p.metabolite_b), u32::MAX);
+            assert_eq!(mem.sense_energy(100).max(mem.sense_resource_b(100)), 195);
+            let after = p.energy as u64
+                + p.metabolite_a as u64
+                + p.metabolite_b as u64
+                + mem.sense_energy(100) as u64
+                + mem.sense_resource_b(100) as u64
+                + ambient;
+            assert_eq!(before, after, "opcode {opcode}");
+        }
+    }
+
+    #[test]
     fn sense_energy_loads_into_reg_b() {
         // Pre-deposit 1500 at address 0; SENSE_ENERGY reads it into reg_b (saturated to u16)
         let code = [32u8, 255]; // SENSE_ENERGY, HALT
@@ -1119,6 +1280,80 @@ mod tests {
         assert_eq!(p.metabolite_b, 0);
         assert_eq!(p.trace.combined_ab, 3);
     }
+
+    #[test]
+    fn conversions_and_combination_cap_zero_b_requests_and_emit_actual_amounts() {
+        let cfg = Config {
+            max_metabolism_per_instruction: 17,
+            ..Config::default()
+        };
+        for request in [0, 100] {
+            for (opcode, pathway) in [
+                (44, MetabolicPathway::A),
+                (45, MetabolicPathway::B),
+                (46, MetabolicPathway::Combined),
+            ] {
+                let (mut p, mut mem, mut fl) = make_program(&[opcode], 100);
+                p.reg_b = request;
+                p.metabolite_a = 100;
+                p.metabolite_b = 100;
+                let (events, ambient) = step_once(&mut p, &mut mem, &mut fl, &cfg, 11);
+                let expected_yield = if opcode == 46 { 34 } else { 17 };
+                assert_eq!(p.energy, 99 + expected_yield);
+                assert_eq!(ambient, 1);
+                assert!(matches!(
+                    events.as_slice(),
+                    [Event::Metabolized {
+                        tick: 11,
+                        id: 1,
+                        pathway: actual_pathway,
+                        energy_yield,
+                        ..
+                    }] if *actual_pathway == pathway && *energy_yield == expected_yield
+                ));
+                match opcode {
+                    44 => assert_eq!((p.metabolite_a, p.metabolite_b), (83, 100)),
+                    45 => assert_eq!((p.metabolite_a, p.metabolite_b), (100, 83)),
+                    46 => assert_eq!((p.metabolite_a, p.metabolite_b), (83, 83)),
+                    _ => unreachable!(),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn metabolic_saturation_conserves_exact_budget_and_reports_reduced_yield() {
+        let cfg = Config {
+            max_metabolism_per_instruction: 17,
+            ..Config::default()
+        };
+        let (mut p, mut mem, mut fl) = make_program(&[46], u32::MAX - 10);
+        p.metabolite_a = u32::MAX;
+        p.metabolite_b = u32::MAX;
+        let before = p.energy as u64 + p.metabolite_a as u64 + p.metabolite_b as u64;
+
+        let (events, ambient) = step_once(&mut p, &mut mem, &mut fl, &cfg, 3);
+
+        assert_eq!(p.energy, u32::MAX - 1);
+        assert_eq!(p.metabolite_a, u32::MAX - 5);
+        assert_eq!(p.metabolite_b, u32::MAX - 5);
+        assert_eq!(ambient, 1);
+        assert_eq!(
+            before,
+            p.energy as u64 + p.metabolite_a as u64 + p.metabolite_b as u64 + ambient
+        );
+        assert!(matches!(
+            events.as_slice(),
+            [Event::Metabolized {
+                pathway: MetabolicPathway::Combined,
+                input_a: 5,
+                input_b: 5,
+                energy_yield: 10,
+                ..
+            }]
+        ));
+    }
+
     #[test]
     fn another_organism_emits_transfer_with_deposit_time_identity_after_donor_changes() {
         let cfg = Config::default();

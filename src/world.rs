@@ -2332,6 +2332,9 @@ mod tests {
 
         world.run(100_000);
 
+        assert_eq!(world.config.max_resource_flux_per_instruction, 256);
+        assert_eq!(world.config.max_metabolism_per_instruction, 256);
+        assert_eq!(world.accounted_budget(), world.config.total_energy);
         assert!(
             world.total_births > 0,
             "ancestor should reproduce from fixed sources"

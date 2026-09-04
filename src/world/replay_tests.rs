@@ -225,7 +225,9 @@ fn namespaces_cover_effective_config_and_ignore_observer_paths() {
         energy_decay_interval,
         energy_current,
         total_energy,
-        child_energy
+        child_energy,
+        max_resource_flux_per_instruction,
+        max_metabolism_per_instruction
     );
     macro_rules! rates { ($($field:ident),*) => { $(change!(|c: &mut Config| c.$field += 0.01);)* }; }
     rates!(

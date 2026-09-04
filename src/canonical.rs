@@ -243,6 +243,8 @@ pub(crate) fn config(config: &Config, out: &mut Encoder) {
         alloc_cost,
         commit_cost,
         max_program_age,
+        max_resource_flux_per_instruction,
+        max_metabolism_per_instruction,
         loop_max_depth,
         ticks_per_stat_log: _,
         rng_seed,
@@ -260,7 +262,7 @@ pub(crate) fn config(config: &Config, out: &mut Encoder) {
         log_path: _,
         templates_dir: _,
     } = config;
-    out.value(&"effective-config/v1");
+    out.value(&"effective-config/v2");
     out.value(&65536u64);
     out.value(initial_energy);
     out.value(mutation_rate);
@@ -274,6 +276,8 @@ pub(crate) fn config(config: &Config, out: &mut Encoder) {
     out.value(alloc_cost);
     out.value(commit_cost);
     out.value(max_program_age);
+    out.value(max_resource_flux_per_instruction);
+    out.value(max_metabolism_per_instruction);
     out.value(loop_max_depth);
     out.value(rng_seed);
     out.value(energy_decay_rate);
