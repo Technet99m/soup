@@ -71,7 +71,7 @@ impl BehaviorSignature {
 /// `heritable_identity` records the exact genome and recognition state that
 /// expressed `behavior`. Ecotype counting uses [`EcotypeEquivalence`], which
 /// retains recognition state and behavior but treats raw genomes as equivalent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct EcotypeIdentity {
     pub heritable_identity: HeritableIdentity,
     pub behavior: BehaviorSignature,
@@ -91,4 +91,65 @@ impl EcotypeIdentity {
 pub struct EcotypeEquivalence {
     pub tag: u8,
     pub behavior: BehaviorSignature,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ecotype_identity_has_a_total_lexicographic_order() {
+        let identities = [
+            EcotypeIdentity {
+                heritable_identity: HeritableIdentity::new(2, 0),
+                behavior: BehaviorSignature {
+                    opcode_presence: 0,
+                    effect_presence: 0,
+                },
+            },
+            EcotypeIdentity {
+                heritable_identity: HeritableIdentity::new(1, 2),
+                behavior: BehaviorSignature {
+                    opcode_presence: 0,
+                    effect_presence: 0,
+                },
+            },
+            EcotypeIdentity {
+                heritable_identity: HeritableIdentity::new(1, 1),
+                behavior: BehaviorSignature {
+                    opcode_presence: 2,
+                    effect_presence: 0,
+                },
+            },
+            EcotypeIdentity {
+                heritable_identity: HeritableIdentity::new(1, 1),
+                behavior: BehaviorSignature {
+                    opcode_presence: 1,
+                    effect_presence: 2,
+                },
+            },
+            EcotypeIdentity {
+                heritable_identity: HeritableIdentity::new(1, 1),
+                behavior: BehaviorSignature {
+                    opcode_presence: 1,
+                    effect_presence: 1,
+                },
+            },
+        ];
+        let ordered: Vec<_> = identities
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        assert_eq!(
+            ordered,
+            [
+                identities[4],
+                identities[3],
+                identities[2],
+                identities[1],
+                identities[0]
+            ]
+        );
+    }
 }

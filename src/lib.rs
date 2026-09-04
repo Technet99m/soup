@@ -1,4 +1,5 @@
 pub mod allocator;
+mod canonical;
 pub mod config;
 pub mod counterfactual;
 pub mod ecotype;

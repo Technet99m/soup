@@ -1213,6 +1213,65 @@ mod tests {
     }
 
     #[test]
+    fn observer_render_and_activity_ignore_program_insertion_order() {
+        let cfg = soup::config::Config {
+            templates_dir: "/nonexistent_soup_replay_templates".into(),
+            ..soup::config::Config::default()
+        };
+        let mut a = super::App::new(cfg.clone());
+        let mut b = super::App::new(cfg);
+        a.world.run(500);
+        b.world = a.world.clone();
+        let mut entries: Vec<_> = b.world.programs.drain().collect();
+        entries.sort_by_key(|(id, _)| std::cmp::Reverse(*id));
+        b.world.programs.extend(entries);
+        a.sample();
+        b.sample();
+        let render = |app: &super::App| {
+            let backend = ratatui::backend::TestBackend::new(160, 50);
+            let mut terminal = ratatui::Terminal::new(backend).unwrap();
+            terminal.draw(|frame| super::render(app, frame)).unwrap();
+            terminal.backend().buffer().clone()
+        };
+        assert_eq!(render(&a), render(&b));
+    }
+
+    #[test]
+    fn reset_replays_identity_digest_and_observer_sequence() {
+        let mut app = super::App::new(soup::config::Config {
+            templates_dir: "/nonexistent_soup_replay_templates".into(),
+            ..soup::config::Config::default()
+        });
+        app.steps_per_frame = 67;
+        let initial = app.world.state_digest();
+        let mut digests = Vec::new();
+        for _ in 0..5 {
+            app.advance();
+            digests.push(app.world.state_digest());
+        }
+        assert!(app.world.total_births > 0);
+        let activity: Vec<_> = app
+            .activity
+            .iter()
+            .map(|a| (a.tick, a.text.clone()))
+            .collect();
+        app.reset();
+        assert_eq!(app.steps_per_frame, 67);
+        assert_eq!(app.world.state_digest(), initial);
+        for digest in digests {
+            app.advance();
+            assert_eq!(app.world.state_digest(), digest);
+        }
+        assert_eq!(
+            activity,
+            app.activity
+                .iter()
+                .map(|a| (a.tick, a.text.clone()))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn summary_ties_are_independent_of_insertion_order() {
         let summaries = vec![
             GenomeSummary {

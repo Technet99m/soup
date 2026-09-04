@@ -1,3 +1,4 @@
+use crate::canonical::{self, Encoder};
 use crate::{
     allocator::FreeList,
     config::Config,
@@ -13,7 +14,8 @@ use crate::{
     template,
     vm::{self, StepResult},
 };
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::{Rng, SeedableRng};
+use rand_chacha::ChaCha12Rng;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
 #[derive(Debug, Clone)]
@@ -65,7 +67,9 @@ pub struct World {
     pub config: Config,
     pub tick: u64,
     next_id: ProgramId,
-    rng: StdRng,
+    rng: ChaCha12Rng,
+    run_namespace: [u8; 32],
+    birth_history: [u8; 32],
     /// Names of the startup templates, indexed by template_id.
     pub template_names: Vec<String>,
     /// Startup genomes, indexed by template_id, used as the evolutionary baseline.
@@ -137,12 +141,16 @@ fn make_free_list(total: u32, placements: &[(u16, u16)]) -> FreeList {
     fl
 }
 
+mod digest;
+
 impl World {
     /// Create a new World, loading templates and placing each at random addresses.
     pub fn new(config: Config) -> Self {
         let templates = template::load_templates(&config.templates_dir);
+        let run_namespace = canonical::namespace(&config, &templates);
+        let mut birth_history = run_namespace;
         let num = templates.len();
-        let mut startup_rng = StdRng::seed_from_u64(config.rng_seed ^ 0x510a_f00d);
+        let mut startup_rng = ChaCha12Rng::seed_from_u64(config.rng_seed ^ 0x510a_f00d);
 
         let mut memory = Memory::new();
         let mut placements: Vec<(u16, u16)> = Vec::with_capacity(num);
@@ -199,7 +207,7 @@ impl World {
         for (i, &(start, len)) in placements.iter().enumerate() {
             let seed_energy = remaining_energy.min(config.initial_energy as u64) as u32;
             remaining_energy -= seed_energy as u64;
-            let prog = Program::new(
+            let mut prog = Program::new(
                 i as ProgramId,
                 start,
                 len,
@@ -208,6 +216,13 @@ impl World {
                 None,
                 Some(i as u8),
             );
+            let mut identity = Encoder::new("startup-lineage/v1");
+            identity.value(&run_namespace);
+            identity.value(&birth_history);
+            identity.value(&prog);
+            identity.value(&templates[i].bytes);
+            birth_history = identity.finish();
+            prog.lineage_id = canonical::uuid(birth_history);
             programs.insert(i as ProgramId, prog);
             queue.push_back(i as ProgramId);
         }
@@ -252,7 +267,9 @@ impl World {
             free_list,
             programs,
             queue,
-            rng: StdRng::seed_from_u64(config.rng_seed),
+            rng: ChaCha12Rng::seed_from_u64(config.rng_seed),
+            run_namespace,
+            birth_history,
             config,
             tick: 0,
             next_id: num as ProgramId,
@@ -485,6 +502,14 @@ impl World {
                 }
                 let parent_start = self.programs[&id].start;
                 self.apply_birth_mutations(&mut child, parent_start, &mut events);
+                // Include the entire birth-time simulation state, not only the child
+                // genome or numeric ID: counterfactual interventions must split history.
+                let mut identity = Encoder::new("birth-lineage/v1");
+                identity.value(&self.state_hash(false));
+                identity.value(child.as_ref());
+                identity.value(&self.memory.read_slice(child.start, child.length));
+                self.birth_history = identity.finish();
+                child.lineage_id = canonical::uuid(self.birth_history);
                 let child_heritable_identity = self.heritable_identity(&child);
                 events.push(Event::Born {
                     tick: self.tick,
@@ -2329,3 +2354,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod replay_tests;

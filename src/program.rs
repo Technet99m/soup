@@ -111,6 +111,17 @@ impl Program {
         parent_lineage_id: Option<Uuid>,
         template_id: Option<u8>,
     ) -> Self {
+        // Standalone VM callers retain the constructor API and get a deterministic
+        // provisional identity. World assigns a namespace/history-derived identity
+        // before a program is installed or a Born event becomes observable.
+        let mut identity = crate::canonical::Encoder::new("standalone-program/v1");
+        identity.value(&id);
+        identity.value(&start);
+        identity.value(&length);
+        identity.value(&energy);
+        identity.value(&parent_id);
+        identity.value(&parent_lineage_id);
+        identity.value(&template_id);
         Self {
             id,
             start,
@@ -127,7 +138,7 @@ impl Program {
             metabolite_b: 0,
             age: 0,
             generation: 0,
-            lineage_id: Uuid::new_v4(),
+            lineage_id: crate::canonical::uuid(identity.finish()),
             parent_lineage_id,
             parent_id,
             template_id,

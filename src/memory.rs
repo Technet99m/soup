@@ -279,6 +279,27 @@ impl Default for Memory {
     }
 }
 
+impl crate::canonical::Encode for ResourceProvenance {
+    fn encode(&self, out: &mut crate::canonical::Encoder) {
+        let Self { amounts } = self;
+        out.value(&amounts.len());
+        for (origin, amount) in amounts {
+            out.value(origin);
+            out.value(amount);
+        }
+    }
+}
+impl crate::canonical::Encode for ResourceOrigin {
+    fn encode(&self, out: &mut crate::canonical::Encoder) {
+        let Self {
+            donor_id,
+            heritable_identity,
+        } = self;
+        out.value(donor_id);
+        out.value(heritable_identity);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

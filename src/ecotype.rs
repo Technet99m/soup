@@ -100,7 +100,7 @@ pub fn viable_ecotypes(
             }
 
             let mut identities: Vec<_> = group.iter().map(|item| item.ecotype_identity()).collect();
-            identities.sort_by_key(|identity| identity.heritable_identity);
+            identities.sort();
             let equivalent_raw_genomes = identities
                 .iter()
                 .map(|identity| identity.heritable_identity.genome)
