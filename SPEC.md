@@ -12,7 +12,7 @@ A digital life simulation where self-replicating bytecode programs evolve inside
 - Every cell is always a valid instruction (no "invalid" states)
 - Memory is **circular** — address arithmetic wraps around
 - Programs occupy contiguous slices: `[start, start + length)`
-- A separate **program registry** maps program IDs to `{ start, length, age, energy, metabolite_a, metabolite_b, tag, lineage_id, parent_id, generation }`
+- A separate **program registry** maps program IDs to `{ start, length, age, energy, metabolite_a, metabolite_b, tag, mutation_strategy, lineage_id, parent_id, generation }`
 - Parallel **resource A** and **resource B** maps (`[u32; 65536]` each) hold deposits independently of instruction bytes. Each chemistry has distinct seek, sense, take, and give instructions. Parallel provenance maps retain exact quantities keyed by the donor ID and the donor's deposit-time `HeritableIdentity`; organism-independent source quantities are explicitly unattributed.
 - External A and B deposits come from fixed or moving periodic sources. Source positions are relative to a seed-derived environmental origin and never depend on the live population or simulation RNG state.
 - A moves forward and B moves backward during decay sweeps. Source movement and counter-currents produce changing local resource conditions while conserving the combined energy budget.
@@ -132,17 +132,19 @@ Energy scarcity and finite body lifetime make survival through descendants requi
 
 ## 6. Mutation
 
-Substitution is applied at **write time** (when `WRITE` or `COPY` executes):
+Substitution is applied only during **replication COPY**: `COPY` must target the executing organism's reserved child allocation. `WRITE`, foreign/attack copies, and working-memory copies are exact.
 
-- The configurable mutation-rate draw decides whether mutation occurs. If it does, one uniformly sampled mutation-choice byte drives a pure local kernel.
+- The parent's inherited fixed-point copy-error locus decides whether mutation occurs. If it does, one uniformly sampled mutation-choice byte drives a pure local kernel.
 - For an even choice, the result is another encoding of the same decoded instruction. Encodings are ordered by raw byte after excluding the source; `(choice >> 1) mod synonym_count` selects one, so the stored raw byte always changes while behavior is synonymous.
 - For an odd choice, bit 1 selects the preceding or following **non-NOP** instruction in canonical opcode order (wrapping between `MOV_FWD` and `HALT`), and `choice >> 2` selects one of its raw aliases. A NOP source enters the same functional ring at one of those endpoints.
 - Thus the complete one-step neighborhood of every functional encoding contains both changed-byte synonyms and non-NOP functional neighbors. It cannot fall into NOP from a functional source.
 - At birth, an insertion position is chosen as before and one uniformly sampled choice byte is inserted unchanged. Since the complete raw alphabet is balanced, this reaches each genotype once without recreating a dominant NOP outcome. Deletion and duplication continue to operate on raw spans.
 - The kernel receives only the source byte and mutation-choice byte. It never receives or inspects viability, lineage, fitness, intended behavior, or world state; there is no post-mutation filtering.
 - Both mappings are pure, so a fixed mutation-choice stream replays byte-for-byte under the same event schedule and RNG seed.
-- Mutation rate is a **configurable global parameter**.
-- At birth, independent configurable rates insert one byte, delete a 1–8 byte span, or duplicate a 1–8 byte span.
+- Mutation control is a five-locus extra-genomic `MutationStrategy`: copy-error, insertion, deletion, duplication, and strategy-self-mutation rates. Each fixed-point value counts successful outcomes among 65,536 random rolls. Structural weights above a combined probability of one are proportionally normalized, preserving their mixture without operator-order bias.
+- Global rates initialize startup ancestors only. `COMMIT` and `SPLIT` inherit the parent's current strategy; config does not overwrite descendants.
+- At birth, inherited structural weights select at most one insertion, deletion, or duplication. A strategy-self-mutation selects one locus uniformly and takes an unbiased higher/lower saturating step of 12.5% (at least one fixed-point unit). Both higher- and lower-fidelity descendants are reachable.
+- Every draw is blind to viability, survival, observed behavior, fitness, and intended outcome. Mutated offspring are never filtered or repaired.
 - `COMMIT` and `SPLIT` copy the parent's current recognition tag to the child before birth mutation.
 - A child's inherited recognition tag can mutate independently at birth according to `TAG_MUTATION_RATE`; a triggered mutation always chooses a different tag.
 - `SET_TAG` changes only the executing organism's current tag. Existing deposits and emitted lineage events retain their earlier snapshots.
@@ -202,9 +204,9 @@ COMMIT               ; child size comes from A
 ## 9. Lineage Tracking
 
 - Each program has a `lineage_id` (UUID) and `parent_id`
-- On `COMMIT`/`SPLIT`: child inherits the parent's lineage chain and current recognition tag before independent birth mutations are applied.
+- On `COMMIT`/`SPLIT`: child inherits the parent's lineage chain, current recognition tag, and mutation strategy before independent birth mutations are applied.
 - Substitutions and structural genome edits are emitted as events
-- A `HeritableIdentity` is the raw `(genome hash, recognition tag)` pair used for lineage, activity, transfer, and counterfactual accounting. Raw genome counts remain tag-independent. “Ecotype” is reserved for the future persistent behavioral-viability concept.
+- A `HeritableIdentity` is the raw `(genome hash, recognition tag, mutation strategy)` tuple used for lineage, clade, activity, transfer, and counterfactual accounting. Raw genome counts remain independent of extra-genomic state.
 - This allows a **full evolutionary tree** to be reconstructed from logs
 
 ---
@@ -328,9 +330,9 @@ No identity generation consumes OS entropy or simulation RNG draws. The existing
 `Program::new` API is retained: standalone VM callers receive a deterministic
 provisional UUID hashed from all constructor arguments. `World` replaces it with
 the run/history identity before exposing a startup organism or birth. Parent
-UUIDs continue to reference the actual parent's lineage UUID. The existing
-64-bit genome fingerprint plus recognition tag (`HeritableIdentity`) is unchanged;
-it groups ecological observations and is not the cryptographic lineage identity.
+UUIDs continue to reference the actual parent's lineage UUID. The 64-bit genome fingerprint, recognition tag, and fixed-point mutation strategy
+form `HeritableIdentity`; it groups ecological observations and is not the
+cryptographic lineage identity.
 
 Clones copy namespace, history, and RNG position. Corresponding births in equal
 clones have identical UUIDs. A counterfactual intervention that changes the state
@@ -341,7 +343,7 @@ metabolism, scheduling, or candidate scoring rule is added or changed.
 
 ### Total observer orderings
 
-All heritable identity comparisons use `(genome, tag)` in ascending order, with
+All heritable identity comparisons use `(genome, tag, mutation strategy)` in ascending order, with
 full values rather than shortened display hashes.
 
 - Transfer-based candidates canonicalize each pair by ascending identity and
@@ -373,7 +375,7 @@ fingerprint without changing the world or consuming randomness. It covers:
   by registry key. Both the key and stored program ID are encoded. Every program
   field is included: addresses, registers, heads, pending allocation, ordered
   loop stack, energy and both metabolites, age, generation, lineage and parent
-  links, template ID, tag, and every trace counter including all opcode counts.
+  links, template ID, tag, all five mutation-strategy loci, and every trace counter including all opcode counts.
 - Each allocator block's start and full `u32` length in allocator order; tick,
   next ID, ambient pool, all birth/death/mutation/foreign-event counters, maximum
   generation, ownership map, tag history, identity history, all per-identity

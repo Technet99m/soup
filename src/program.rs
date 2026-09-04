@@ -1,3 +1,4 @@
+use crate::mutation::MutationStrategy;
 use crate::opcode::Opcode;
 use arrayvec::ArrayVec;
 use uuid::Uuid;
@@ -97,6 +98,8 @@ pub struct Program {
     pub template_id: Option<u8>,
     /// Heritable recognition marker used by SEEK_TAG.
     pub tag: u8,
+    /// Extra-genomic mutation controls inherited by descendants.
+    pub mutation_strategy: MutationStrategy,
     /// Observable execution phenotype accumulated over this lifetime.
     pub trace: BehaviorTrace,
 }
@@ -143,6 +146,7 @@ impl Program {
             parent_id,
             template_id,
             tag: 0,
+            mutation_strategy: MutationStrategy::default(),
             trace: BehaviorTrace::default(),
         }
     }

@@ -28,6 +28,39 @@ fn independent_worlds_and_clones_emit_identical_births() {
     );
 }
 
+#[test]
+fn cloned_worlds_replay_strategy_mutation_in_births_and_digests() {
+    let mut cfg = config();
+    cfg.initial_energy = 10_000;
+    cfg.mutation_rate = 0.0;
+    cfg.insertion_rate = 0.0;
+    cfg.deletion_rate = 0.0;
+    cfg.duplication_rate = 0.0;
+    cfg.tag_mutation_rate = 0.0;
+    cfg.strategy_mutation_rate = 1.0;
+    let mut first = World::new(cfg);
+    let ancestor_strategy = first.programs[&0].mutation_strategy;
+    let mut cloned = first.clone();
+
+    let first_events = first.run(5_000);
+    let cloned_events = cloned.run(5_000);
+    assert_eq!(
+        serde_json::to_vec(&first_events).unwrap(),
+        serde_json::to_vec(&cloned_events).unwrap()
+    );
+    let child_strategy = first_events.iter().find_map(|event| match event {
+        soup::events::Event::Born {
+            heritable_identity, ..
+        } => Some(heritable_identity.mutation_strategy),
+        _ => None,
+    });
+    assert_ne!(
+        child_strategy.expect("strategy-mutated child"),
+        ancestor_strategy
+    );
+    assert_eq!(first.state_digest(), cloned.state_digest());
+}
+
 struct Fixture(PathBuf);
 impl Fixture {
     fn new() -> Self {

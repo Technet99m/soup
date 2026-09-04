@@ -8,7 +8,7 @@ use crate::{
     events::{DeathCause, Event, ResourceKind, StructuralMutationKind},
     identity::{EcotypeEquivalence, HeritableIdentity},
     memory::Memory,
-    mutation,
+    mutation::{self, Direction},
     opcode::Opcode,
     program::{Program, ProgramId},
     template,
@@ -83,7 +83,7 @@ pub struct World {
     pub addr_to_owner: Box<[Option<ProgramId>]>,
     /// Current tag by program ID. Dead IDs remain as harmless historical entries.
     pub program_tags: Vec<u8>,
-    /// Successful reproduction attributed to the parent's byte-and-tag heritable identity.
+    /// Successful reproduction attributed to the parent's complete heritable identity.
     pub births_by_parent_heritable_identity: HashMap<HeritableIdentity, u64>,
     /// Tick of the latest successful reproduction by each heritable identity.
     pub last_birth_by_heritable_identity: HashMap<HeritableIdentity, u64>,
@@ -216,6 +216,7 @@ impl World {
                 None,
                 Some(i as u8),
             );
+            prog.mutation_strategy = config.ancestor_mutation_strategy();
             let mut identity = Encoder::new("startup-lineage/v1");
             identity.value(&run_namespace);
             identity.value(&birth_history);
@@ -243,8 +244,11 @@ impl World {
         }
         let mut heritable_identity_by_id = vec![HeritableIdentity::new(0, 0); num];
         for program in programs.values() {
-            heritable_identity_by_id[program.id as usize] =
-                HeritableIdentity::new(genome_hash_in_memory(&memory, program), program.tag);
+            heritable_identity_by_id[program.id as usize] = HeritableIdentity::with_strategy(
+                genome_hash_in_memory(&memory, program),
+                program.tag,
+                program.mutation_strategy,
+            );
         }
         let active_behavior_segments = programs
             .values()
@@ -397,7 +401,11 @@ impl World {
             if let Some(tag) = self.program_tags.get_mut(id as usize) {
                 *tag = program.tag;
             }
-            HeritableIdentity::new(genome_hash_in_memory(&self.memory, program), program.tag)
+            HeritableIdentity::with_strategy(
+                genome_hash_in_memory(&self.memory, program),
+                program.tag,
+                program.mutation_strategy,
+            )
         });
         if let Some(current_heritable_identity) = current_heritable_identity {
             if let Some(heritable_identity) = self.heritable_identity_by_id.get_mut(id as usize) {
@@ -407,7 +415,11 @@ impl World {
         }
         if let Some(victim_id) = write_victim.filter(|victim_id| *victim_id != id) {
             let victim_identity = self.programs.get(&victim_id).map(|program| {
-                HeritableIdentity::new(genome_hash_in_memory(&self.memory, program), program.tag)
+                HeritableIdentity::with_strategy(
+                    genome_hash_in_memory(&self.memory, program),
+                    program.tag,
+                    program.mutation_strategy,
+                )
             });
             if let Some(victim_identity) = victim_identity {
                 if let Some(historical) = self.heritable_identity_by_id.get_mut(victim_id as usize)
@@ -741,19 +753,7 @@ impl World {
         parent_start: u16,
         events: &mut Vec<Event>,
     ) {
-        let roll = self.rng.gen::<f64>();
-        let insert_edge = self.config.insertion_rate.max(0.0);
-        let delete_edge = insert_edge + self.config.deletion_rate.max(0.0);
-        let duplicate_edge = delete_edge + self.config.duplication_rate.max(0.0);
-        let kind = if roll < insert_edge {
-            Some(StructuralMutationKind::Insertion)
-        } else if roll < delete_edge {
-            Some(StructuralMutationKind::Deletion)
-        } else if roll < duplicate_edge {
-            Some(StructuralMutationKind::Duplication)
-        } else {
-            None
-        };
+        let kind = child.mutation_strategy.structural_kind(self.rng.gen());
 
         if let Some(kind) = kind {
             let old_length = child.length;
@@ -822,6 +822,18 @@ impl World {
                 old_tag,
                 new_tag,
             });
+        }
+
+        if (self.rng.gen::<u16>() as u32) < child.mutation_strategy.strategy_mutation_rate {
+            let locus = self
+                .rng
+                .gen_range(0..mutation::MutationStrategy::LOCUS_COUNT);
+            let direction = if self.rng.gen::<bool>() {
+                Direction::Higher
+            } else {
+                Direction::Lower
+            };
+            child.mutation_strategy = child.mutation_strategy.mutate_locus(locus, direction);
         }
     }
 
@@ -958,9 +970,13 @@ impl World {
         genome_hash_in_memory(&self.memory, program)
     }
 
-    /// Heritable evolutionary identity combines executable bytes and recognition tag.
+    /// Identity combines executable bytes, recognition tag, and mutation strategy.
     pub fn heritable_identity(&self, program: &Program) -> HeritableIdentity {
-        HeritableIdentity::new(self.genome_hash(program), program.tag)
+        HeritableIdentity::with_strategy(
+            self.genome_hash(program),
+            program.tag,
+            program.mutation_strategy,
+        )
     }
 
     /// Number of distinct live byte sequences, independent of recognition tag.
@@ -1358,7 +1374,7 @@ mod tests {
     }
 
     #[test]
-    fn heritable_identity_distinguishes_recognition_tag_and_genome_collisions() {
+    fn heritable_identity_distinguishes_recognition_tag_genome_and_strategy() {
         let mut world = World::new(seed_config());
         let program = world.programs[&0].clone();
         let genome = world.genome_hash(&program);
@@ -1379,13 +1395,30 @@ mod tests {
             original_heritable_identity,
             world.heritable_identity(&other_genome)
         );
+
+        world.memory.place(program.start, &world.template_bytes[0]);
+        let mut other_strategy = program.clone();
+        other_strategy.mutation_strategy.copy_error_rate += 1;
+        assert_ne!(
+            world.heritable_identity(&program),
+            world.heritable_identity(&other_strategy)
+        );
+
+        let mut changed_world = world.clone();
+        changed_world
+            .programs
+            .get_mut(&0)
+            .unwrap()
+            .mutation_strategy = other_strategy.mutation_strategy;
+        assert_ne!(world.state_digest(), changed_world.state_digest());
     }
 
     #[test]
-    fn offspring_inherit_parent_tag_and_lineage_event_identity() {
+    fn offspring_inherit_parent_tag_strategy_and_lineage_event_identity() {
         let mut cfg = seed_config();
         cfg.initial_energy = 10_000;
         cfg.mutation_rate = 0.0;
+        cfg.strategy_mutation_rate = 0.0;
         cfg.insertion_rate = 0.0;
         cfg.deletion_rate = 0.0;
         cfg.duplication_rate = 0.0;
@@ -1393,6 +1426,8 @@ mod tests {
         let mut world = World::new(cfg);
         world.programs.get_mut(&0).unwrap().tag = 23;
         world.program_tags[0] = 23;
+        let parent_strategy = mutation::MutationStrategy::new(11, 22, 33, 44, 0);
+        world.programs.get_mut(&0).unwrap().mutation_strategy = parent_strategy;
 
         let born = (0..10_000).find_map(|_| {
             world
@@ -1410,11 +1445,38 @@ mod tests {
             unreachable!()
         };
         assert_eq!(heritable_identity.tag, 23);
+        assert_eq!(heritable_identity.mutation_strategy, parent_strategy);
         assert_eq!(world.programs[&id].tag, 23);
+        assert_eq!(world.programs[&id].mutation_strategy, parent_strategy);
         assert_eq!(
             world.heritable_identity(&world.programs[&id]),
             heritable_identity
         );
+    }
+
+    #[test]
+    fn mutation_strategy_self_mutates_across_generations_without_filtering() {
+        let mut cfg = seed_config();
+        cfg.mutation_rate = 0.0;
+        cfg.insertion_rate = 0.0;
+        cfg.deletion_rate = 0.0;
+        cfg.duplication_rate = 0.0;
+        cfg.tag_mutation_rate = 0.0;
+        cfg.strategy_mutation_rate = 1.0;
+        let mut world = World::new(cfg);
+        let parent_start = world.programs[&0].start;
+        let inherited = world.programs[&0].mutation_strategy;
+        let mut child = Program::new(1, parent_start, 4, 100, Some(0), None, None);
+        child.mutation_strategy = inherited;
+
+        world.apply_birth_mutations(&mut child, parent_start, &mut Vec::new());
+        assert_ne!(child.mutation_strategy, inherited);
+        let child_strategy = child.mutation_strategy;
+
+        let mut grandchild = Program::new(2, parent_start, 4, 100, Some(1), None, None);
+        grandchild.mutation_strategy = child_strategy;
+        world.apply_birth_mutations(&mut grandchild, parent_start, &mut Vec::new());
+        assert_ne!(grandchild.mutation_strategy, child_strategy);
     }
 
     #[test]
@@ -1466,6 +1528,12 @@ mod tests {
         let receiver = HeritableIdentity::new(deposited.genome ^ 1, 42);
 
         world.programs.get_mut(&0).unwrap().tag = 99;
+        world
+            .programs
+            .get_mut(&0)
+            .unwrap()
+            .mutation_strategy
+            .copy_error_rate += 1;
         let changed = world.heritable_identity(&world.programs[&0]);
         world.programs.remove(&0);
         world.record_resource_transfer(deposited, receiver, 77);
@@ -2000,7 +2068,7 @@ mod tests {
 
     #[test]
     fn mutation_events_are_emitted() {
-        // Use mutation_rate = 1.0 to guarantee every write mutates
+        // Use mutation_rate = 1.0 to guarantee every replication COPY mutates.
         let mut cfg = seed_config();
         cfg.mutation_rate = 1.0;
         cfg.initial_energy = 10_000;

@@ -11,6 +11,7 @@ The redesign gives evolution room to change more than byte values:
 - a heritable, mutable tag can be set and searched for by programs;
 - execution traces classify what a genome actually does, aggregating redundant raw opcode aliases under one decoded instruction while exact byte genomes remain distinct;
 - all 256 bytes use a balanced redundant opcode encoding, and substitutions move through a documented local synonymous/adjacent-instruction kernel rather than an overwhelmingly NOP basin;
+- replication fidelity and insertion/deletion/duplication spectra are inherited extra-genomic traits that can themselves drift upward or downward;
 - suspected partnerships can be tested in cloned worlds with either partner removed.
 
 Run the live evolution observer:
@@ -23,7 +24,9 @@ Start at 100 ticks per frame and use `+` to accelerate. The genome view colors l
 
 ## Recognition identity
 
-`HeritableIdentity` is the raw pair `(genome hash, recognition tag)`. The explicit tag component keeps identical byte sequences with different partner-recognition behavior separate, while the genome component keeps unrelated programs that happen to use the same tag separate. Children inherit their parent's tag on both `COMMIT` and `SPLIT`. `SET_TAG` changes the executing organism's tag during its lifetime, and `tag_mutation_rate` independently replaces an inherited tag at birth (a mutation always chooses a value different from the inherited one). Birth lineage events record the child's complete heritable identity.
+`HeritableIdentity` is the raw tuple `(genome hash, recognition tag, mutation strategy)`. The explicit extra-genomic components keep identical byte sequences with different recognition behavior or mutation spectra in separate clades. Children inherit their parent's tag and five-locus mutation strategy on both `COMMIT` and `SPLIT`. Each strategy locus is a fixed-point probability controlling replication-copy substitution, insertion, deletion, duplication, or mutation of the strategy itself. A strategy mutation chooses one locus and an unbiased higher/lower step without inspecting survival, behavior, fitness, or the mutation's outcome; no offspring is filtered after mutation. `SET_TAG` changes the executing organism's tag during its lifetime, and `tag_mutation_rate` independently replaces an inherited tag at birth. Birth lineage events record the child's complete heritable identity.
+
+The strategy's fidelity locus applies only when `COPY` writes into the executing parent's reserved child allocation. `WRITE`, attack-like copies, and working-memory copies remain exact, so evolvable replication fidelity cannot silently alter other memory operations. The legacy global mutation rates now initialize startup ancestors; they do not overwrite descendants. Defaults quantize to 1/65,536 probability units and retain the ancestor's viable reproduction cycle.
 
 ## Behavioral ecotypes
 

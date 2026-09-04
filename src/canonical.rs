@@ -4,6 +4,7 @@ use crate::{
     ecotype::{BehaviorObservation, ObservationTermination, ViableEcotype},
     events::ResourceKind,
     identity::{BehaviorSignature, EcotypeEquivalence, EcotypeIdentity, HeritableIdentity},
+    mutation::MutationStrategy,
     program::{BehaviorTrace, Program},
     template::Template,
 };
@@ -113,9 +114,23 @@ impl Encode for Uuid {
 }
 impl Encode for HeritableIdentity {
     fn encode(&self, out: &mut Encoder) {
-        let Self { genome, tag } = self;
+        let Self {
+            genome,
+            tag,
+            mutation_strategy,
+        } = self;
         out.value(genome);
         out.value(tag);
+        out.value(mutation_strategy);
+    }
+}
+impl Encode for MutationStrategy {
+    fn encode(&self, out: &mut Encoder) {
+        out.value(&self.copy_error_rate);
+        out.value(&self.insertion_rate);
+        out.value(&self.deletion_rate);
+        out.value(&self.duplication_rate);
+        out.value(&self.strategy_mutation_rate);
     }
 }
 impl Encode for BehaviorSignature {
@@ -140,8 +155,13 @@ impl Encode for EcotypeIdentity {
 }
 impl Encode for EcotypeEquivalence {
     fn encode(&self, out: &mut Encoder) {
-        let Self { tag, behavior } = self;
+        let Self {
+            tag,
+            mutation_strategy,
+            behavior,
+        } = self;
         out.value(tag);
+        out.value(mutation_strategy);
         out.value(behavior);
     }
 }
@@ -233,6 +253,7 @@ pub(crate) fn config(config: &Config, out: &mut Encoder) {
         memory_size: _, // VM address space is always 65536, regardless of this legacy field.
         initial_energy,
         mutation_rate,
+        strategy_mutation_rate,
         insertion_rate,
         deletion_rate,
         duplication_rate,
@@ -264,6 +285,7 @@ pub(crate) fn config(config: &Config, out: &mut Encoder) {
     out.value(&65536u64);
     out.value(initial_energy);
     out.value(mutation_rate);
+    out.value(strategy_mutation_rate);
     out.value(insertion_rate);
     out.value(deletion_rate);
     out.value(duplication_rate);
@@ -333,6 +355,7 @@ impl Encode for Program {
             parent_id,
             template_id,
             tag,
+            mutation_strategy,
             trace,
         } = self;
         out.value(id);
@@ -355,6 +378,7 @@ impl Encode for Program {
         out.value(parent_id);
         out.value(template_id);
         out.value(tag);
+        out.value(mutation_strategy);
         out.value(trace);
     }
 }
@@ -431,6 +455,7 @@ mod tests {
         };
         let equivalence = EcotypeEquivalence {
             tag: 0x20,
+            mutation_strategy: MutationStrategy::default(),
             behavior,
         };
         let viable = ViableEcotype {
@@ -450,16 +475,25 @@ mod tests {
         out.value(&ObservationTermination::Live);
 
         let mut expected = Vec::new();
+        let strategy_bytes = || {
+            let mut bytes = Vec::new();
+            for rate in [328u32, 262, 262, 262, 655] {
+                bytes.extend_from_slice(&rate.to_le_bytes());
+            }
+            bytes
+        };
         let identity_bytes = || {
             let mut bytes = Vec::new();
             bytes.extend_from_slice(&0x1112_1314_1516_1718u64.to_le_bytes());
             bytes.push(0x19);
+            bytes.extend(strategy_bytes());
             bytes.extend_from_slice(&0x0102_0304_0506_0708u64.to_le_bytes());
             bytes.extend_from_slice(&0x090au16.to_le_bytes());
             bytes
         };
         expected.extend(identity_bytes());
         expected.push(0x20);
+        expected.extend(strategy_bytes());
         expected.extend_from_slice(&0x0102_0304_0506_0708u64.to_le_bytes());
         expected.extend_from_slice(&0x090au16.to_le_bytes());
         expected.extend(identity_bytes());

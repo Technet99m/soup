@@ -1,4 +1,5 @@
 use crate::events::ResourceKind;
+use crate::mutation::MutationStrategy;
 use serde::Deserialize;
 use std::path::PathBuf;
 
@@ -37,6 +38,8 @@ pub struct Config {
     pub memory_size: usize,
     pub initial_energy: u32,
     pub mutation_rate: f64,
+    /// Ancestor default chance per birth that one mutation-strategy locus changes.
+    pub strategy_mutation_rate: f64,
     /// Chance per birth of inserting a random instruction.
     pub insertion_rate: f64,
     /// Chance per birth of deleting a short instruction span.
@@ -96,6 +99,7 @@ impl Default for Config {
             memory_size: 65536,
             initial_energy: 5_000,
             mutation_rate: 0.005,
+            strategy_mutation_rate: 0.01,
             insertion_rate: 0.004,
             deletion_rate: 0.004,
             duplication_rate: 0.004,
@@ -152,6 +156,17 @@ impl Default for Config {
 }
 
 impl Config {
+    /// Initial extra-genomic strategy assigned to startup ancestors.
+    pub fn ancestor_mutation_strategy(&self) -> MutationStrategy {
+        MutationStrategy::new(
+            MutationStrategy::rate_from_probability(self.mutation_rate),
+            MutationStrategy::rate_from_probability(self.insertion_rate),
+            MutationStrategy::rate_from_probability(self.deletion_rate),
+            MutationStrategy::rate_from_probability(self.duplication_rate),
+            MutationStrategy::rate_from_probability(self.strategy_mutation_rate),
+        )
+    }
+
     /// Load config: start with defaults, optionally overlay a TOML file,
     /// then override individual fields with env vars.
     pub fn from_env() -> Self {
@@ -164,6 +179,7 @@ impl Config {
                 // Overlay file values onto defaults
                 c.initial_energy = file_cfg.initial_energy;
                 c.mutation_rate = file_cfg.mutation_rate;
+                c.strategy_mutation_rate = file_cfg.strategy_mutation_rate;
                 c.insertion_rate = file_cfg.insertion_rate;
                 c.deletion_rate = file_cfg.deletion_rate;
                 c.duplication_rate = file_cfg.duplication_rate;
@@ -203,6 +219,7 @@ impl Config {
         }
         parse_env!(initial_energy, "INITIAL_ENERGY");
         parse_env!(mutation_rate, "MUTATION_RATE");
+        parse_env!(strategy_mutation_rate, "STRATEGY_MUTATION_RATE");
         parse_env!(insertion_rate, "INSERTION_RATE");
         parse_env!(deletion_rate, "DELETION_RATE");
         parse_env!(duplication_rate, "DUPLICATION_RATE");

@@ -86,6 +86,7 @@ struct Activity {
 struct GenomeSummary {
     hash: u64,
     tag: u8,
+    mutation_strategy: soup::mutation::MutationStrategy,
     population: usize,
     births: u64,
     max_generation: u32,
@@ -320,7 +321,11 @@ impl App {
             .into_iter()
             .map(|summary| {
                 (
-                    HeritableIdentity::new(summary.hash, summary.tag),
+                    HeritableIdentity::with_strategy(
+                        summary.hash,
+                        summary.tag,
+                        summary.mutation_strategy,
+                    ),
                     phenotype(&summary),
                 )
             })
@@ -392,6 +397,7 @@ impl App {
                 .or_insert_with(|| GenomeSummary {
                     hash: heritable_identity.genome,
                     tag: heritable_identity.tag,
+                    mutation_strategy: heritable_identity.mutation_strategy,
                     births: self
                         .world
                         .births_by_parent_heritable_identity
@@ -565,6 +571,7 @@ fn sort_genome_summaries(summaries: &mut [GenomeSummary]) {
             std::cmp::Reverse(summary.max_generation),
             summary.hash,
             summary.tag,
+            summary.mutation_strategy,
         )
     });
 }
@@ -574,7 +581,17 @@ fn genome_color(hash: u64) -> Color {
 }
 
 fn heritable_identity_color(heritable_identity: HeritableIdentity) -> Color {
-    genome_color(heritable_identity.genome ^ ((heritable_identity.tag as u64) << 56))
+    let strategy = heritable_identity.mutation_strategy;
+    let strategy_mix = [
+        strategy.copy_error_rate,
+        strategy.insertion_rate,
+        strategy.deletion_rate,
+        strategy.duplication_rate,
+        strategy.strategy_mutation_rate,
+    ]
+    .into_iter()
+    .fold(0u64, |hash, rate| hash.rotate_left(11) ^ rate as u64);
+    genome_color(heritable_identity.genome ^ ((heritable_identity.tag as u64) << 56) ^ strategy_mix)
 }
 
 fn ancestor_color(template_id: Option<u8>) -> Color {
@@ -645,7 +662,7 @@ fn render_header(app: &App, frame: &mut Frame, area: Rect) {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(format!(
-                "   tick {:>10}   counter-currents {} / {}   life {} ops   substitutions {:.2}%   structural {:.2}%",
+                "   tick {:>10}   counter-currents {} / {}   life {} ops   ancestor substitutions {:.2}%   structural {:.2}%",
                 world.tick,
                 world.config.energy_current,
                 world.config.energy_decay_interval,
@@ -822,7 +839,11 @@ fn render_species(app: &App, frame: &mut Frame, area: Rect) {
         .iter()
         .take(area.height.saturating_sub(3) as usize)
         .map(|summary| {
-            let color = heritable_identity_color(HeritableIdentity::new(summary.hash, summary.tag));
+            let color = heritable_identity_color(HeritableIdentity::with_strategy(
+                summary.hash,
+                summary.tag,
+                summary.mutation_strategy,
+            ));
             Row::new(vec![
                 Cell::from("●").style(Style::default().fg(color)),
                 Cell::from(format!("{:06x}", summary.hash & 0xffffff))
@@ -1298,6 +1319,15 @@ mod tests {
                 births: 3,
                 ..GenomeSummary::default()
             },
+            GenomeSummary {
+                hash: 20,
+                tag: 1,
+                mutation_strategy: soup::mutation::MutationStrategy::new(999, 1, 2, 3, 4),
+                population: 4,
+                max_generation: 7,
+                births: 3,
+                ..GenomeSummary::default()
+            },
         ];
         let mut forward = summaries.clone();
         let mut reverse = summaries;
@@ -1309,11 +1339,20 @@ mod tests {
         let keys = |items: &[GenomeSummary]| {
             items
                 .iter()
-                .map(|summary| (summary.hash, summary.tag))
+                .map(|summary| {
+                    (
+                        summary.hash,
+                        summary.tag,
+                        summary.mutation_strategy.copy_error_rate,
+                    )
+                })
                 .collect::<Vec<_>>()
         };
         assert_eq!(keys(&forward), keys(&reverse));
-        assert_eq!(keys(&forward), vec![(20, 1), (20, 9), (30, 2)]);
+        assert_eq!(
+            keys(&forward),
+            vec![(20, 1, 328), (20, 1, 999), (20, 9, 328), (30, 2, 328)]
+        );
     }
 
     #[test]
@@ -1353,14 +1392,8 @@ mod tests {
         app.handle_trial_event(TrialEvent::Completed {
             source_tick: 123,
             report: SymbiosisReport {
-                heritable_identity_a: HeritableIdentity {
-                    genome: 0xaaa,
-                    tag: 1,
-                },
-                heritable_identity_b: HeritableIdentity {
-                    genome: 0xbbb,
-                    tag: 2,
-                },
+                heritable_identity_a: HeritableIdentity::new(0xaaa, 1),
+                heritable_identity_b: HeritableIdentity::new(0xbbb, 2),
                 horizon: 10,
                 baseline_births_a: 3,
                 baseline_births_b: 4,
@@ -1386,14 +1419,8 @@ mod tests {
 
         app.handle_trial_event(TrialEvent::Failed {
             source_tick: 456,
-            heritable_identity_a: HeritableIdentity {
-                genome: 0xccc,
-                tag: 3,
-            },
-            heritable_identity_b: HeritableIdentity {
-                genome: 0xddd,
-                tag: 4,
-            },
+            heritable_identity_a: HeritableIdentity::new(0xccc, 3),
+            heritable_identity_b: HeritableIdentity::new(0xddd, 4),
             reason: TrialFailureReason::WorkerPanicked,
         });
 
