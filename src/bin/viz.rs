@@ -740,18 +740,20 @@ fn mnemonic(byte: u8) -> &'static str {
         25 => "ALLOC",
         26 => "BIRTH",
         27 => "SPLIT",
-        30 => "GIVE",
-        31 => "TAKE",
+        30 => "EXCRETE-A",
+        31 => "TAKE-A",
+        32 => "SENSE-A",
         33 => "SIZE",
-        35 => "HUNT",
-        36 => "DRAIN",
+        34 => "SET-RH",
+        35 => "SEEK-FOREIGN",
+        36 => "EXCRETE-A@",
         37 => "TAKE-B",
         38 => "SENSE-B",
-        39 => "GIVE-B",
+        39 => "EXCRETE-B",
         40 => "SEEK-A",
         41 => "SEEK-B",
         42 => "SET-TAG",
-        43 => "FIND-TAG",
+        43 => "SEEK-TAG",
         44 => "CONVERT-A",
         45 => "CONVERT-B",
         46 => "COMBINE-AB",
@@ -948,4 +950,36 @@ fn main() -> io::Result<()> {
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::mnemonic;
+
+    #[test]
+    fn metabolic_opcodes_have_explicit_display_mnemonics() {
+        let expected = [
+            (30, "EXCRETE-A"),
+            (31, "TAKE-A"),
+            (32, "SENSE-A"),
+            (33, "SIZE"),
+            (34, "SET-RH"),
+            (35, "SEEK-FOREIGN"),
+            (36, "EXCRETE-A@"),
+            (37, "TAKE-B"),
+            (38, "SENSE-B"),
+            (39, "EXCRETE-B"),
+            (40, "SEEK-A"),
+            (41, "SEEK-B"),
+            (42, "SET-TAG"),
+            (43, "SEEK-TAG"),
+            (44, "CONVERT-A"),
+            (45, "CONVERT-B"),
+            (46, "COMBINE-AB"),
+        ];
+
+        for (byte, expected_mnemonic) in expected {
+            assert_eq!(mnemonic(byte), expected_mnemonic, "opcode byte {byte}");
+        }
+    }
 }

@@ -642,7 +642,7 @@ impl World {
             match deposit.kind {
                 ResourceKind::A => self.memory.give_energy(index as u16, actual),
                 ResourceKind::B => self.memory.give_resource_b(index as u16, actual),
-            }
+            };
             deposited += actual as u64;
         }
         self.ambient_pool -= deposited;
@@ -1440,11 +1440,8 @@ mod tests {
 
         for _ in 0..10_000 {
             world.tick();
-            let program_energy: u64 = world.programs.values().map(|p| p.energy as u64).sum();
-            let resource_a: u64 = world.memory.energy_map.iter().map(|&v| v as u64).sum();
-            let resource_b: u64 = world.memory.resource_b_map.iter().map(|&v| v as u64).sum();
             assert_eq!(
-                world.ambient_pool + program_energy + resource_a + resource_b,
+                world.accounted_budget(),
                 world.config.total_energy,
                 "energy was not conserved at tick {}",
                 world.tick
