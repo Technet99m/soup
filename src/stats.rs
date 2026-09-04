@@ -179,6 +179,40 @@ mod tests {
     use crate::world::World;
 
     #[test]
+    fn tied_tag_summaries_and_truncation_are_independent_of_map_order() {
+        let mut world = World::new(Config {
+            templates_dir: "/nonexistent_soup_replay_templates".into(),
+            ..Config::default()
+        });
+        let original = world.programs[&0].clone();
+        world.programs.clear();
+        for tag in (0..10).rev() {
+            let mut program = original.clone();
+            program.id = tag as u32;
+            program.tag = tag;
+            world.programs.insert(program.id, program);
+            world.births_by_parent_heritable_identity.insert(
+                crate::identity::HeritableIdentity::new(0, tag),
+                10 - tag as u64,
+            );
+        }
+        let forward = StatsSnapshot::compute(&world);
+        let mut entries: Vec<_> = world.programs.drain().collect();
+        entries.sort_by_key(|(id, _)| *id);
+        world.programs.extend(entries);
+        let reversed = StatsSnapshot::compute(&world);
+        assert_eq!(
+            forward.tags.iter().map(|s| s.tag).collect::<Vec<_>>(),
+            (0..10).collect::<Vec<_>>()
+        );
+        assert_eq!(forward.tags, reversed.tags);
+        assert_eq!(forward.format_headless(), reversed.format_headless());
+        assert!(forward
+            .format_headless()
+            .ends_with("00:1/10,01:1/9,02:1/8,03:1/7,04:1/6,05:1/5"));
+    }
+
+    #[test]
     fn snapshot_from_fresh_world() {
         use std::path::PathBuf;
         let cfg = Config {

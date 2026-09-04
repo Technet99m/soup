@@ -6,6 +6,7 @@ fn main() {
     // Parse --ticks N from CLI args
     let mut max_ticks: Option<u64> = None;
     let mut test_symbiosis = false;
+    let mut state_digest = false;
     let mut symbiosis_horizon = 100_000;
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
@@ -18,6 +19,9 @@ fn main() {
                 eprintln!("--ticks requires an argument");
                 std::process::exit(1);
             }
+        } else if args[i] == "--state-digest" {
+            state_digest = true;
+            i += 1;
         } else if args[i] == "--test-symbiosis" {
             test_symbiosis = true;
             i += 1;
@@ -77,6 +81,11 @@ fn main() {
                 break;
             }
         }
+    }
+
+    log.flush();
+    if state_digest {
+        println!("State digest: {}", world.state_digest());
     }
 
     if test_symbiosis {
