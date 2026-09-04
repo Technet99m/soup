@@ -35,6 +35,7 @@ Controls:
 - `v`: cycle genome, ancestry, and resource views
 - `up` / `down`: inspect another organism
 - `y`: run a 100,000-tick partner-removal experiment on cloned worlds
+- `x`: cancel the active partner-removal experiment
 - `r`: start again from the single ancestor
 - `q`: exit
 

@@ -18,7 +18,12 @@ use ratatui::{
     Frame, Terminal,
 };
 use soup::{
-    config::Config, events::Event, identity::HeritableIdentity, stats::tag_stats, world::World,
+    config::Config,
+    counterfactual::{TrialEvent, TrialSnapshot, TrialStartError, TrialWorker},
+    events::Event,
+    identity::HeritableIdentity,
+    stats::tag_stats,
+    world::World,
 };
 
 const GENOME_COLORS: [Color; 12] = [
@@ -108,6 +113,7 @@ struct App {
     live_history: VecDeque<u64>,
     genome_history: VecDeque<u64>,
     mutation_sites: VecDeque<(u64, u16)>,
+    trial: TrialWorker,
 }
 
 impl App {
@@ -132,6 +138,7 @@ impl App {
             live_history: VecDeque::new(),
             genome_history: VecDeque::new(),
             mutation_sites: VecDeque::new(),
+            trial: TrialWorker::default(),
         };
         app.sample();
         app
@@ -139,8 +146,12 @@ impl App {
 
     fn reset(&mut self) {
         let speed = self.steps_per_frame;
+        let failures = self.trial.cancel_and_join();
         *self = Self::new(self.config.clone());
         self.steps_per_frame = speed;
+        for failure in failures {
+            self.handle_trial_event(failure);
+        }
     }
 
     fn tick_once(&mut self) {
@@ -414,7 +425,15 @@ impl App {
 
     fn test_symbiosis(&mut self) {
         let horizon = 100_000;
-        let Some(report) = self.world.counterfactual_symbiosis(horizon) else {
+        if self.trial.is_running() {
+            self.push_activity(
+                self.world.tick,
+                "counterfactual already running; press x to cancel".into(),
+                ActivityKind::Relationship,
+            );
+            return;
+        }
+        let Some(snapshot) = TrialSnapshot::capture(&self.world) else {
             self.push_activity(
                 self.world.tick,
                 "counterfactual needs two candidate heritable identities".into(),
@@ -422,22 +441,126 @@ impl App {
             );
             return;
         };
-        self.push_activity(
-            self.world.tick,
-            format!(
-                "counterfactual {:?}: {:06x}/{:02x} loses {:.0}%, {:06x}/{:02x} loses {:.0}% (births {} / {})",
-                report.verdict,
-                report.heritable_identity_a.genome & 0xffffff,
-                report.heritable_identity_a.tag,
-                report.dependence_a * 100.0,
-                report.heritable_identity_b.genome & 0xffffff,
-                report.heritable_identity_b.tag,
-                report.dependence_b * 100.0,
-                report.baseline_births_a,
-                report.baseline_births_b,
+        let source_tick = snapshot.source_tick();
+        let (identity_a, identity_b) = snapshot.heritable_identity_pair();
+        match self.trial.start(snapshot, horizon) {
+            Ok(()) => self.push_activity(
+                source_tick,
+                format!(
+                    "counterfactual started: {:06x}/{:02x} / {:06x}/{:02x} from source tick {source_tick}",
+                    identity_a.genome & 0xffffff,
+                    identity_a.tag,
+                    identity_b.genome & 0xffffff,
+                    identity_b.tag,
+                ),
+                ActivityKind::Relationship,
             ),
-            ActivityKind::Relationship,
-        );
+            Err(TrialStartError::AlreadyRunning) => self.push_activity(
+                self.world.tick,
+                "counterfactual already running; press x to cancel".into(),
+                ActivityKind::Relationship,
+            ),
+            Err(TrialStartError::StartupFailed) => self.poll_trial(),
+        }
+    }
+
+    fn cancel_trial(&mut self) {
+        if !self.trial.cancel() {
+            self.push_activity(
+                self.world.tick,
+                "no counterfactual trial is running".into(),
+                ActivityKind::Relationship,
+            );
+        }
+    }
+
+    fn poll_trial(&mut self) {
+        for event in self.trial.poll() {
+            self.handle_trial_event(event);
+        }
+    }
+
+    fn handle_trial_event(&mut self, event: TrialEvent) {
+        match event {
+            TrialEvent::Progress(_) => {}
+            TrialEvent::Completed {
+                source_tick,
+                report,
+            } => self.push_activity(
+                source_tick,
+                format!(
+                    "counterfactual {:?} from source tick {source_tick}: {:06x}/{:02x} loses {:.0}%, {:06x}/{:02x} loses {:.0}% (births {} / {})",
+                    report.verdict,
+                    report.heritable_identity_a.genome & 0xffffff,
+                    report.heritable_identity_a.tag,
+                    report.dependence_a * 100.0,
+                    report.heritable_identity_b.genome & 0xffffff,
+                    report.heritable_identity_b.tag,
+                    report.dependence_b * 100.0,
+                    report.baseline_births_a,
+                    report.baseline_births_b,
+                ),
+                ActivityKind::Relationship,
+            ),
+            TrialEvent::Cancelled {
+                source_tick,
+                heritable_identity_a,
+                heritable_identity_b,
+            } => self.push_activity(
+                source_tick,
+                format!(
+                    "counterfactual cancelled: {:06x}/{:02x} / {:06x}/{:02x} from source tick {source_tick}",
+                    heritable_identity_a.genome & 0xffffff,
+                    heritable_identity_a.tag,
+                    heritable_identity_b.genome & 0xffffff,
+                    heritable_identity_b.tag,
+                ),
+                ActivityKind::Relationship,
+            ),
+            TrialEvent::Failed {
+                source_tick,
+                heritable_identity_a,
+                heritable_identity_b,
+                reason,
+            } => self.push_activity(
+                source_tick,
+                format!(
+                    "counterfactual failed: {reason}; {:06x}/{:02x} / {:06x}/{:02x} from source tick {source_tick}",
+                    heritable_identity_a.genome & 0xffffff,
+                    heritable_identity_a.tag,
+                    heritable_identity_b.genome & 0xffffff,
+                    heritable_identity_b.tag,
+                ),
+                ActivityKind::Relationship,
+            ),
+        }
+    }
+
+    fn shutdown(&mut self) -> Vec<String> {
+        let failures = self.trial.cancel_and_join();
+        let output = failures.iter().filter_map(trial_failure_output).collect();
+        for failure in failures {
+            self.handle_trial_event(failure);
+        }
+        output
+    }
+}
+
+fn trial_failure_output(event: &TrialEvent) -> Option<String> {
+    match event {
+        TrialEvent::Failed {
+            source_tick,
+            heritable_identity_a,
+            heritable_identity_b,
+            reason,
+        } => Some(format!(
+            "counterfactual failed for {:06x}/{:02x} / {:06x}/{:02x} from source tick {source_tick}: {reason}",
+            heritable_identity_a.genome & 0xffffff,
+            heritable_identity_a.tag,
+            heritable_identity_b.genome & 0xffffff,
+            heritable_identity_b.tag,
+        )),
+        _ => None,
     }
 }
 
@@ -910,7 +1033,31 @@ fn render_inspector(app: &App, frame: &mut Frame, area: Rect) {
 }
 
 fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
-    let line = Line::from(vec![
+    let mut spans = Vec::new();
+    if let Some(progress) = app.trial.progress() {
+        spans.push(Span::styled(
+            format!(
+                " trial {}/{} {:06x}/{:02x}-{:06x}/{:02x} @{} ",
+                progress.completed,
+                progress.total,
+                progress.heritable_identity_a.genome & 0xffffff,
+                progress.heritable_identity_a.tag,
+                progress.heritable_identity_b.genome & 0xffffff,
+                progress.heritable_identity_b.tag,
+                progress.source_tick,
+            ),
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Rgb(255, 209, 102))
+                .add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::styled(
+            " x ",
+            Style::default().fg(Color::Black).bg(Color::White),
+        ));
+        spans.push(Span::raw(" cancel  "));
+    }
+    spans.extend([
         Span::styled(
             " space ",
             Style::default().fg(Color::Black).bg(Color::White),
@@ -931,7 +1078,7 @@ fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
         Span::styled(" q ", Style::default().fg(Color::Black).bg(Color::White)),
         Span::raw(" quit"),
     ]);
-    frame.render_widget(Paragraph::new(line), area);
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn render(app: &App, frame: &mut Frame) {
@@ -954,10 +1101,14 @@ fn render(app: &App, frame: &mut Frame) {
     render_footer(app, frame, chunks[3]);
 }
 
-fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) -> io::Result<()> {
+fn run(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    mut app: App,
+) -> io::Result<Vec<String>> {
     let frame_interval = Duration::from_millis(50);
     let mut last_frame = Instant::now();
     loop {
+        app.poll_trial();
         terminal.draw(|frame| render(&app, frame))?;
         let wait = frame_interval
             .checked_sub(last_frame.elapsed())
@@ -968,9 +1119,11 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) -> i
             }) = event::read()?
             {
                 match code {
-                    KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => return Ok(()),
+                    KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => {
+                        return Ok(app.shutdown());
+                    }
                     KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
-                        return Ok(())
+                        return Ok(app.shutdown());
                     }
                     KeyCode::Char('p') | KeyCode::Char(' ') => app.paused = !app.paused,
                     KeyCode::Char('.') | KeyCode::Char('s') => {
@@ -985,6 +1138,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) -> i
                     }
                     KeyCode::Char('r') => app.reset(),
                     KeyCode::Char('y') => app.test_symbiosis(),
+                    KeyCode::Char('x') => app.cancel_trial(),
                     KeyCode::Down => app.select(1),
                     KeyCode::Up => app.select(-1),
                     _ => {}
@@ -1009,12 +1163,20 @@ fn main() -> io::Result<()> {
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
-    result
+    for failure in result? {
+        eprintln!("{failure}");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{mnemonic, phenotype, sort_genome_summaries, GenomeSummary};
+    use super::*;
+    use soup::{
+        counterfactual::{TrialEvent, TrialFailureReason},
+        world::{RelationshipVerdict, SymbiosisReport},
+    };
+    use std::path::PathBuf;
 
     #[test]
     fn observer_distinguishes_local_organism_searches() {
@@ -1112,5 +1274,68 @@ mod tests {
         for (byte, expected_mnemonic) in expected {
             assert_eq!(mnemonic(byte), expected_mnemonic, "opcode byte {byte}");
         }
+    }
+
+    #[test]
+    fn completed_trial_is_delivered_to_evolution_feed_at_source_tick() {
+        let mut app = App::new(Config {
+            templates_dir: PathBuf::from("/nonexistent_soup_viz_tests"),
+            ..Config::default()
+        });
+
+        app.handle_trial_event(TrialEvent::Completed {
+            source_tick: 123,
+            report: SymbiosisReport {
+                heritable_identity_a: HeritableIdentity {
+                    genome: 0xaaa,
+                    tag: 1,
+                },
+                heritable_identity_b: HeritableIdentity {
+                    genome: 0xbbb,
+                    tag: 2,
+                },
+                horizon: 10,
+                baseline_births_a: 3,
+                baseline_births_b: 4,
+                dependence_a: 0.25,
+                dependence_b: 0.5,
+                verdict: RelationshipVerdict::Mutualism,
+            },
+        });
+
+        let activity = app.activity.front().expect("trial activity");
+        assert_eq!(activity.tick, 123);
+        assert!(activity.text.contains("source tick 123"));
+        assert!(activity.text.contains("000aaa/01"));
+        assert!(activity.text.contains("000bbb/02"));
+    }
+
+    #[test]
+    fn failed_trial_is_delivered_to_evolution_feed_with_reason() {
+        let mut app = App::new(Config {
+            templates_dir: PathBuf::from("/nonexistent_soup_viz_tests"),
+            ..Config::default()
+        });
+
+        app.handle_trial_event(TrialEvent::Failed {
+            source_tick: 456,
+            heritable_identity_a: HeritableIdentity {
+                genome: 0xccc,
+                tag: 3,
+            },
+            heritable_identity_b: HeritableIdentity {
+                genome: 0xddd,
+                tag: 4,
+            },
+            reason: TrialFailureReason::WorkerPanicked,
+        });
+
+        let activity = app.activity.front().expect("trial failure activity");
+        assert_eq!(activity.tick, 456);
+        assert!(activity
+            .text
+            .starts_with("counterfactual failed: worker stopped unexpectedly"));
+        assert!(activity.text.contains("000ccc/03"));
+        assert!(activity.text.contains("000ddd/04"));
     }
 }
