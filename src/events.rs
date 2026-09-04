@@ -51,7 +51,8 @@ pub enum Event {
         old_tag: u8,
         new_tag: u8,
     },
-    /// A resource deposited by one organism was consumed by another.
+    /// A resource deposited by one organism was consumed by another ProgramId.
+    /// The donor identity is the deposit-time snapshot used for attribution.
     ResourceTransfer {
         tick: u64,
         donor_id: ProgramId,

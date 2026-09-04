@@ -58,6 +58,26 @@ pub struct StatsSnapshot {
 }
 
 impl StatsSnapshot {
+    /// Column headings for the headless statistics rows.
+    pub fn headless_header() -> String {
+        format!(
+            "{:>12}  {:>5}  {:>11}  {:>20}  {:>4}  {:>5}  {:>7}  {:>9}  {:>6}  {:>10}  {:>9}  {:>9}  {}",
+            "tick",
+            "live",
+            "raw_genomes",
+            "heritable_identities",
+            "gen",
+            "drift",
+            "births",
+            "mutations",
+            "mem%",
+            "ambient",
+            "A",
+            "B",
+            "tags(pop/births)"
+        )
+    }
+
     pub fn compute(world: &World) -> Self {
         let live_programs = world.programs.len();
 
@@ -113,8 +133,8 @@ impl StatsSnapshot {
         }
     }
 
-    /// Print a human-readable summary to stdout.
-    pub fn print(&self) {
+    /// Format one row for the headless statistics table.
+    pub fn format_headless(&self) -> String {
         let tags = self
             .tags
             .iter()
@@ -122,8 +142,8 @@ impl StatsSnapshot {
             .map(|tag| format!("{:02x}:{}/{}", tag.tag, tag.population, tag.births))
             .collect::<Vec<_>>()
             .join(",");
-        println!(
-            "tick={:>12}  live={:>5}  genomes={:>4}  identities={:>4}  gen={:>4}  drift={:>3}  births={:>7}  mutations={:>6}  mem={:>5.1}%  ambient={:>10}  A={:>9}  B={:>9}  tags(pop/births)={}",
+        format!(
+            "{:>12}  {:>5}  {:>11}  {:>20}  {:>4}  {:>5}  {:>7}  {:>9}  {:>5.1}%  {:>10}  {:>9}  {:>9}  {}",
             self.tick,
             self.live_programs,
             self.live_genomes,
@@ -137,7 +157,12 @@ impl StatsSnapshot {
             self.energy_map_total,
             self.resource_b_total,
             tags,
-        );
+        )
+    }
+
+    /// Print a human-readable summary to stdout.
+    pub fn print(&self) {
+        println!("{}", self.format_headless());
     }
 }
 
@@ -193,5 +218,42 @@ mod tests {
         assert_eq!(snapshot.tags[0].tag, 12);
         assert_eq!(snapshot.tags[0].population, 2);
         assert_eq!(snapshot.tags[0].births, 6);
+    }
+
+    #[test]
+    fn headless_header_matches_snapshot_output_columns() {
+        fn token_end_columns(line: &str) -> Vec<usize> {
+            let bytes = line.as_bytes();
+            bytes
+                .iter()
+                .enumerate()
+                .filter_map(|(index, byte)| {
+                    (!byte.is_ascii_whitespace()
+                        && bytes
+                            .get(index + 1)
+                            .is_none_or(|next| next.is_ascii_whitespace()))
+                    .then_some(index + 1)
+                })
+                .collect()
+        }
+
+        let cfg = Config {
+            templates_dir: std::path::PathBuf::from("/nonexistent_soup_test_templates"),
+            ..Config::default()
+        };
+        let snapshot = StatsSnapshot::compute(&World::new(cfg));
+        let header = StatsSnapshot::headless_header();
+        let line = snapshot.format_headless();
+
+        assert!(header.contains("raw_genomes"));
+        assert!(header.contains("heritable_identities"));
+        assert_eq!(
+            header.split_whitespace().count(),
+            line.split_whitespace().count()
+        );
+        assert_eq!(
+            &token_end_columns(&header)[..12],
+            &token_end_columns(&line)[..12]
+        );
     }
 }

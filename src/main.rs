@@ -49,10 +49,7 @@ fn main() {
     let mut log = EventLog::open(&log_path).expect("failed to open event log");
     let mut world = World::new(config);
 
-    println!(
-        "{:>12}  {:>5}  {:>7}  {:>4}  {:>5}  {:>7}  {:>9}  {:>6}",
-        "tick", "live", "identities", "gen", "drift", "births", "mutations", "mem%"
-    );
+    println!("{}", StatsSnapshot::headless_header());
 
     loop {
         if !running.load(Ordering::SeqCst) {

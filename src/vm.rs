@@ -1071,7 +1071,7 @@ mod tests {
         assert_eq!(p.trace.combined_ab, 3);
     }
     #[test]
-    fn cross_feeding_uses_deposit_time_identity_after_donor_tag_change_and_death() {
+    fn another_organism_emits_transfer_with_deposit_time_identity_after_donor_changes() {
         let cfg = Config::default();
         let mut next_id = 100;
         let mut rng = StdRng::seed_from_u64(0);
@@ -1142,6 +1142,61 @@ mod tests {
                 && donor_heritable_identity.tag == 0
                 && receiver_heritable_identity.tag == 0
         )));
+    }
+
+    #[test]
+    fn same_organism_after_identity_change_is_not_a_resource_transfer() {
+        let cfg = Config::default();
+        let mut next_id = 100;
+        let mut rng = StdRng::seed_from_u64(0);
+        let mut events = Vec::new();
+        let mut ambient = 0;
+        let (mut organism, mut mem, mut fl) = make_program(&[39u8], 100);
+        organism.reg_b = 200;
+        organism.metabolite_b = 200;
+
+        let _ = step(
+            &mut organism,
+            &mut mem,
+            &mut fl,
+            &NO_OWNERS,
+            &NO_TAGS,
+            &cfg,
+            &mut next_id,
+            &mut rng,
+            &mut events,
+            8,
+            &mut ambient,
+        );
+        assert_eq!(organism.metabolite_b, 0);
+        assert_eq!(mem.sense_resource_b(organism.start), 200);
+        let deposited_identity = HeritableIdentity::new(genome_hash(&mem, &organism), 0);
+
+        organism.tag = 99;
+        mem.write(organism.start, 37);
+        organism.ip = organism.start;
+        organism.rh = organism.start;
+        let changed_identity = HeritableIdentity::new(genome_hash(&mem, &organism), organism.tag);
+        assert_ne!(deposited_identity, changed_identity);
+
+        let _ = step(
+            &mut organism,
+            &mut mem,
+            &mut fl,
+            &NO_OWNERS,
+            &NO_TAGS,
+            &cfg,
+            &mut next_id,
+            &mut rng,
+            &mut events,
+            9,
+            &mut ambient,
+        );
+
+        assert_eq!(organism.metabolite_b, 200);
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, Event::ResourceTransfer { .. })));
     }
 
     #[test]

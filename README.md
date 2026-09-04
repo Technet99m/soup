@@ -37,7 +37,7 @@ Controls:
 - `r`: start again from the single ancestor
 - `q`: exit
 
-The simulation records the donor behind each consumed deposit. Counterfactual tests first choose an active pair with direct cross-genome transfer evidence, falling back to abundant complementary metabolisms when no such exchange exists. The result reports how much each genome's reproduction rate falls without the other. `Mutualism` requires both losses to reach 20% with at least two intact-world births each. That is evidence of ecological dependence under the current conditions, not proof that either program is semantically novel.
+The simulation records the donor behind each consumed deposit. Counterfactual tests first choose an active pair of heritable identities with direct cross-organism resource-transfer evidence, falling back to abundant complementary metabolisms when no such exchange exists. The result reports how much each heritable identity's reproduction rate falls without the other. `Mutualism` requires both losses to reach 20% with at least two intact-world births each. That is evidence of ecological dependence under the current conditions, not proof that either program is semantically novel.
 
 For a reproducible headless run:
 

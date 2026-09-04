@@ -96,7 +96,7 @@ LOOP — loop stack (max depth 8)
 
 ## 4. Energy System
 
-- Each program starts with **200 energy units**
+- Each program starts with **5,000 energy units** by default
 - Each instruction executed costs **1 energy**
 - `ALLOC` costs **10 energy**
 - `COMMIT` / `SPLIT` costs **20 energy**
@@ -208,6 +208,8 @@ METABOLIZED { tick, id, pathway, input_a, input_b, energy_yield }
 COMMITTED  { tick, parent_id, child_id }
 ```
 
+`RESOURCE_TRANSFER` is a cross-organism exchange: the donor and receiver must have different `ProgramId` values. The donor's deposit-time `HeritableIdentity` is retained for attribution even if that organism later changes its tag or genome; an identity change alone does not turn an organism's recovery of its own deposit into a transfer.
+
 ### Live stats (emit every N ticks):
 ```text
 - Total live programs
@@ -217,7 +219,7 @@ COMMITTED  { tick, parent_id, child_id }
 - Oldest living program age (in ticks)
 - Per-organism execution counts, A/B harvests, A/B gifts, and tag searches
 - Per-organism A/B stores plus A, B, and combined conversion totals
-- Exact deposit-time donor provenance for resources consumed by a different heritable identity, including after donor mutation or death
+- Exact deposit-time donor provenance for resources consumed by a different organism (`ProgramId`), including after donor mutation or death
 - `METABOLIZED` events containing the pathway, A/B inputs, and energy yield
 - Counterfactual reproductive-rate change after removing either candidate partner
 ```
@@ -230,7 +232,7 @@ All as environment variables or a config file:
 
 ```text
 MEMORY_SIZE         default: 65536
-INITIAL_ENERGY      default: 200
+INITIAL_ENERGY      default: 5000
 MUTATION_RATE       default: 0.005
 INSERTION_RATE      default: 0.004 per birth
 DELETION_RATE       default: 0.004 per birth
