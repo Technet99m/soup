@@ -19,6 +19,9 @@ pub struct BehaviorTrace {
     pub converted_a: u64,
     pub converted_b: u64,
     pub combined_ab: u64,
+    /// Local foreign-organism searches attempted.
+    pub foreign_seeks: u64,
+    /// Local recognition-tag searches attempted.
     pub tag_seeks: u64,
 }
 
@@ -34,6 +37,7 @@ impl Default for BehaviorTrace {
             converted_a: 0,
             converted_b: 0,
             combined_ab: 0,
+            foreign_seeks: 0,
             tag_seeks: 0,
         }
     }

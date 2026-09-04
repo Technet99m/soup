@@ -1,8 +1,9 @@
 name = "carnivore_killer"
-description = "Injection predator: repeatedly finds the nearest foreign program and overwrites the first byte of its body with HALT (0xFF). Victim halts when its IP reaches that byte, returning its energy to the ambient pool."
+description = "Local injection predator: searches both directions within interaction_radius for the nearest foreign program and overwrites the first reachable byte with HALT (0xFF)."
 seed = false # hostile inoculation; enable explicitly for a predator experiment
 # 8 bytes:
-# [0]  SEEK_FOREIGN_START (35) — reg_b = nearest foreign-owned address
+# [0]  SEEK_FOREIGN_START (35) — reg_b = nearest local foreign-owned address;
+#      unchanged when no victim is within the inclusive interaction radius
 # [1]  SET_WRITE_HEAD     (11) — WH = reg_b (victim body)
 # [2]  LOAD_IMM           (12)
 # [3]  255                     — reg_a = HALT opcode

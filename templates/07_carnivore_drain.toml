@@ -1,9 +1,10 @@
 name = "carnivore_drain"
-description = "Injection parasite: injects EXCRETE_A_IMM so a victim deposits stored A at address 0x0000, then takes and converts that A. It cannot manufacture A from victim energy."
+description = "Local injection parasite: finds the nearest victim within interaction_radius and injects EXCRETE_A_IMM so stored A is deposited at 0x0000, then taken and converted."
 seed = false # hostile inoculation; enable explicitly for a predator experiment
 # 28 bytes:
 # Phase 1: inject [EXCRETE_A_IMM, 0x00, 0x00] at victim's address
-# [0]  SEEK_FOREIGN_START (35) — reg_b = foreign addr
+# [0]  SEEK_FOREIGN_START (35) — reg_b = nearest local foreign addr;
+#      unchanged when no victim is within the inclusive interaction radius
 # [1]  SET_WRITE_HEAD     (11) — WH = foreign addr
 # [2]  LOAD_IMM           (12)
 # [3]  36                      — reg_a = EXCRETE_A_IMM opcode
