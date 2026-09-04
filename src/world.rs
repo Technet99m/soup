@@ -1,7 +1,7 @@
 use crate::{
     allocator::FreeList,
     config::Config,
-    events::{DeathCause, Event, StructuralMutationKind},
+    events::{DeathCause, Event, ResourceKind, StructuralMutationKind},
     memory::Memory,
     program::{Program, ProgramId},
     template,
@@ -29,6 +29,14 @@ pub enum RelationshipVerdict {
     BDependsOnA,
     Competition,
     Inconclusive,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResourceDeposit {
+    pub kind: ResourceKind,
+    pub start: u16,
+    pub width: usize,
+    pub amount: u32,
 }
 
 #[derive(Clone)]
@@ -120,16 +128,33 @@ impl World {
         let mut placements: Vec<(u16, u16)> = Vec::with_capacity(num);
         let mut free_ranges: Vec<(u32, u32)> = vec![(0, 65536)];
 
-        for tmpl in templates.iter() {
+        let environment_origin = environment_origin(config.rng_seed);
+        for (template_index, tmpl) in templates.iter().enumerate() {
             let len = tmpl.bytes.len() as u32;
+            let preferred_start = (environment_origin as u32).min(65_536 - len);
             let fitting: Vec<usize> = free_ranges
                 .iter()
                 .enumerate()
                 .filter_map(|(i, (start, end))| (end - start >= len).then_some(i))
                 .collect();
-            let chosen_idx = fitting[startup_rng.gen_range(0..fitting.len())];
+            let chosen_idx = if template_index == 0 {
+                fitting
+                    .iter()
+                    .copied()
+                    .find(|&index| {
+                        let (start, end) = free_ranges[index];
+                        start <= preferred_start && preferred_start + len <= end
+                    })
+                    .expect("the environment origin fits the first startup template")
+            } else {
+                fitting[startup_rng.gen_range(0..fitting.len())]
+            };
             let (range_start, range_end) = free_ranges.remove(chosen_idx);
-            let start = startup_rng.gen_range(range_start..=range_end - len);
+            let start = if template_index == 0 {
+                preferred_start
+            } else {
+                startup_rng.gen_range(range_start..=range_end - len)
+            };
             let end = start + len;
 
             if range_start < start {
@@ -245,43 +270,10 @@ impl World {
             self.memory.resource_b_donor.rotate_left(current);
         }
 
-        // Periodic ambient drip: deposit a chunk from ambient pool to a random cell.
-        let drip_interval = self.config.ambient_drip_interval;
-        if drip_interval > 0 && self.tick.is_multiple_of(drip_interval) {
-            let amount = (self.config.ambient_drip_amount as u64).min(self.ambient_pool) as u32;
-            if amount > 0 {
-                use rand::Rng;
-                let global_start = self.rng.gen::<u16>();
-                let width = self.config.energy_rain_width.clamp(1, 65536);
-                let start = if !self.programs.is_empty()
-                    && self.rng.gen::<f64>() < self.config.energy_rain_life_bias.clamp(0.0, 1.0)
-                {
-                    let index = self.rng.gen_range(0..self.programs.len());
-                    let mut ids: Vec<_> = self.programs.keys().copied().collect();
-                    ids.sort_unstable();
-                    let organism_start = self.programs[&ids[index]].start;
-                    let radius = self.config.energy_rain_radius as i32;
-                    let offset = self.rng.gen_range(-radius..=radius);
-                    organism_start.wrapping_add(offset as u16)
-                } else {
-                    global_start
-                };
-                let base = amount / width as u32;
-                let remainder = amount % width as u32;
-                let resource_b = (self.tick / drip_interval).is_multiple_of(2);
-                for offset in 0..width {
-                    let share = base + u32::from((offset as u32) < remainder);
-                    if share > 0 {
-                        let addr = start.wrapping_add(offset as u16);
-                        if resource_b {
-                            self.memory.give_resource_b(addr, share);
-                        } else {
-                            self.memory.give_energy(addr, share);
-                        }
-                    }
-                }
-                self.ambient_pool -= amount as u64;
-            }
+        // External sources have their own deterministic schedule. They never inspect
+        // live organisms or consume the VM/mutation RNG stream.
+        for deposit in self.scheduled_resources(self.tick) {
+            self.apply_resource_deposit(deposit);
         }
 
         // Pop the next program ID (skipping dead ones lazily).
@@ -591,6 +583,66 @@ impl World {
         true
     }
 
+    /// Return the complete external source schedule for a tick. This is a pure
+    /// function of the seed, tick, and source configuration: organism state and
+    /// the simulation RNG cannot influence it.
+    pub fn scheduled_resources(&self, tick: u64) -> Vec<ResourceDeposit> {
+        if tick == 0 {
+            return Vec::new();
+        }
+        let origin = self.environment_origin();
+        self.config
+            .resource_sources
+            .iter()
+            .filter_map(|source| {
+                if source.interval == 0 || !tick.is_multiple_of(source.interval) {
+                    return None;
+                }
+                let emission = tick / source.interval - 1;
+                let movement =
+                    (source.velocity as i128 * emission as i128).rem_euclid(65_536) as u16;
+                Some(ResourceDeposit {
+                    kind: source.kind,
+                    start: origin.wrapping_add(source.offset).wrapping_add(movement),
+                    width: source.width.clamp(1, 65_536),
+                    amount: source.amount,
+                })
+            })
+            .collect()
+    }
+
+    pub fn environment_origin(&self) -> u16 {
+        environment_origin(self.config.rng_seed)
+    }
+
+    fn apply_resource_deposit(&mut self, deposit: ResourceDeposit) {
+        let requested = (deposit.amount as u64).min(self.ambient_pool) as u32;
+        let base = requested / deposit.width as u32;
+        let remainder = requested % deposit.width as u32;
+        let mut deposited = 0u64;
+        for offset in 0..deposit.width {
+            let share = base + u32::from((offset as u32) < remainder);
+            if share == 0 {
+                continue;
+            }
+            let index = deposit.start.wrapping_add(offset as u16) as usize;
+            let available = match deposit.kind {
+                ResourceKind::A => u32::MAX - self.memory.energy_map[index],
+                ResourceKind::B => u32::MAX - self.memory.resource_b_map[index],
+            };
+            let actual = share.min(available);
+            if actual == 0 {
+                continue;
+            }
+            match deposit.kind {
+                ResourceKind::A => self.memory.give_energy(index as u16, actual),
+                ResourceKind::B => self.memory.give_resource_b(index as u16, actual),
+            }
+            deposited += actual as u64;
+        }
+        self.ambient_pool -= deposited;
+    }
+
     /// Run for `n` ticks, collecting all events.
     pub fn run(&mut self, n: u64) -> Vec<Event> {
         let mut all = Vec::new();
@@ -836,6 +888,20 @@ impl World {
     }
 }
 
+fn environment_origin(seed: u64) -> u16 {
+    // SplitMix64 finalizer gives each seed a stable, well-distributed spatial phase.
+    let mut value = seed.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    let mixed = value ^ (value >> 31);
+    (mixed % 64_512) as u16
+}
+
+#[cfg(test)]
+fn circular_distance(a: u16, b: u16) -> u16 {
+    a.wrapping_sub(b).min(b.wrapping_sub(a))
+}
+
 fn relative_loss(baseline: f64, counterfactual: f64) -> f64 {
     if baseline <= f64::EPSILON {
         0.0
@@ -889,7 +955,7 @@ mod tests {
     #[test]
     fn energy_current_moves_deposits_around_the_ring() {
         let mut cfg = seed_config();
-        cfg.ambient_drip_interval = 0;
+        cfg.resource_sources.clear();
         cfg.energy_decay_interval = 1;
         cfg.energy_decay_rate = 0;
         cfg.energy_current = 17;
@@ -931,7 +997,7 @@ mod tests {
         let mut cfg = seed_config();
         cfg.max_program_age = 3;
         cfg.initial_energy = 100;
-        cfg.ambient_drip_interval = 0;
+        cfg.resource_sources.clear();
         let mut world = World::new(cfg);
 
         let events = world.run(3);
@@ -1160,5 +1226,171 @@ mod tests {
         }
         // Should still be alive or dead gracefully — no panics
         assert!(world.live_count() == 0 || world.live_count() >= 1);
+    }
+
+    #[test]
+    fn resource_sources_do_not_emit_at_tick_zero() {
+        let world = World::new(seed_config());
+        assert!(world.scheduled_resources(0).is_empty());
+    }
+
+    #[test]
+    fn saturated_source_cell_preserves_existing_donor() {
+        let mut world = World::new(seed_config());
+        let start = 123;
+        world.memory.energy_map[start as usize] = u32::MAX;
+        world.memory.resource_a_donor[start as usize] = Some(7);
+        let ambient_before = world.ambient_pool;
+
+        world.apply_resource_deposit(ResourceDeposit {
+            kind: ResourceKind::A,
+            start,
+            width: 1,
+            amount: 10,
+        });
+
+        assert_eq!(world.memory.resource_a_donor[start as usize], Some(7));
+        assert_eq!(world.ambient_pool, ambient_before);
+    }
+
+    #[test]
+    fn external_resource_schedule_is_independent_of_organisms() {
+        let cfg = seed_config();
+        let intact = World::new(cfg.clone());
+        let mut empty = intact.clone();
+        let ancestor = empty.genome_hash(&empty.programs[&0]);
+        empty.remove_genome(ancestor);
+        for _ in 0..100 {
+            empty.rng.gen::<u64>();
+        }
+
+        for tick in 1..=1_000 {
+            assert_eq!(
+                intact.scheduled_resources(tick),
+                empty.scheduled_resources(tick),
+                "external schedule diverged at tick {tick}"
+            );
+        }
+    }
+
+    #[test]
+    fn external_resource_schedule_replays_from_seed_and_config() {
+        let left = World::new(seed_config());
+        let right = World::new(seed_config());
+
+        let left_schedule: Vec<_> = (1..=1_000)
+            .flat_map(|tick| left.scheduled_resources(tick))
+            .collect();
+        let right_schedule: Vec<_> = (1..=1_000)
+            .flat_map(|tick| right.scheduled_resources(tick))
+            .collect();
+
+        assert_eq!(left_schedule, right_schedule);
+        assert!(!left_schedule.is_empty());
+    }
+
+    #[test]
+    fn seed_changes_the_resource_schedule_spatial_phase() {
+        let left = World::new(seed_config());
+        let mut other_config = seed_config();
+        other_config.rng_seed = other_config.rng_seed.wrapping_add(1);
+        let right = World::new(other_config);
+
+        assert_ne!(left.scheduled_resources(10), right.scheduled_resources(10));
+    }
+
+    #[test]
+    fn multiple_sources_create_different_local_conditions() {
+        let mut world = World::new(seed_config());
+        let ancestor = world.genome_hash(&world.programs[&0]);
+        world.remove_genome(ancestor);
+        world.run(10);
+
+        let origin = world.environment_origin();
+        let sum_window = |map: &[u32; 65536], start: u16| -> u64 {
+            (0..256)
+                .map(|offset| map[start.wrapping_add(offset) as usize] as u64)
+                .sum()
+        };
+        let a_near_a = sum_window(&world.memory.energy_map, origin);
+        let b_near_a = sum_window(&world.memory.resource_b_map, origin);
+        let distant = origin.wrapping_add(16_384);
+        let a_distant = sum_window(&world.memory.energy_map, distant);
+        let b_distant = sum_window(&world.memory.resource_b_map, distant);
+
+        assert_ne!((a_near_a, b_near_a), (a_distant, b_distant));
+        assert!(
+            a_near_a > b_near_a,
+            "A source should dominate its local niche"
+        );
+        assert!(
+            b_distant > a_distant,
+            "B source should dominate its local niche"
+        );
+    }
+
+    #[test]
+    fn ancestor_starts_with_both_external_resources_in_reach() {
+        let world = World::new(seed_config());
+        let ancestor = &world.programs[&0];
+        let first_tick = world
+            .config
+            .resource_sources
+            .iter()
+            .map(|source| source.interval)
+            .filter(|interval| *interval > 0)
+            .min()
+            .expect("at least one enabled resource source");
+        let first_deposits = world.scheduled_resources(first_tick);
+
+        for kind in [
+            crate::events::ResourceKind::A,
+            crate::events::ResourceKind::B,
+        ] {
+            assert!(first_deposits.iter().any(|deposit| {
+                deposit.kind == kind
+                    && circular_distance(ancestor.start, deposit.start)
+                        <= world.config.interaction_radius
+            }));
+        }
+    }
+
+    #[test]
+    fn ancestor_remains_viable_without_targeted_rain() {
+        let mut cfg = seed_config();
+        cfg.rng_seed = 14_201;
+        cfg.initial_energy = 500;
+        cfg.mutation_rate = 0.0;
+        cfg.insertion_rate = 0.0;
+        cfg.deletion_rate = 0.0;
+        cfg.duplication_rate = 0.0;
+        cfg.tag_mutation_rate = 0.0;
+        let mut world = World::new(cfg);
+
+        world.run(100_000);
+
+        assert!(
+            world.total_births > 0,
+            "ancestor should reproduce from fixed sources"
+        );
+        assert!(world.live_count() > 0, "the lineage should remain alive");
+    }
+
+    #[test]
+    fn external_sources_preserve_total_energy() {
+        let mut world = World::new(seed_config());
+
+        for _ in 0..10_000 {
+            world.tick();
+            let program_energy: u64 = world.programs.values().map(|p| p.energy as u64).sum();
+            let resource_a: u64 = world.memory.energy_map.iter().map(|&v| v as u64).sum();
+            let resource_b: u64 = world.memory.resource_b_map.iter().map(|&v| v as u64).sum();
+            assert_eq!(
+                world.ambient_pool + program_energy + resource_a + resource_b,
+                world.config.total_energy,
+                "energy was not conserved at tick {}",
+                world.tick
+            );
+        }
     }
 }

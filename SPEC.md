@@ -14,7 +14,8 @@ A digital life simulation where self-replicating bytecode programs evolve inside
 - Programs occupy contiguous slices: `[start, start + length)`
 - A separate **program registry** maps program IDs to `{ start, length, age, energy }`
 - Parallel **resource A** and **resource B** maps (`[u32; 65536]` each) hold deposits independently of instruction bytes. Each chemistry has distinct seek, sense, take, and give instructions.
-- A moves forward and B moves backward during decay sweeps. Counter-currents produce changing local resource conditions while conserving the combined energy budget.
+- External A and B deposits come from fixed or moving periodic sources. Source positions are relative to a seed-derived environmental origin and never depend on the live population or simulation RNG state.
+- A moves forward and B moves backward during decay sweeps. Source movement and counter-currents produce changing local resource conditions while conserving the combined energy budget.
 
 ---
 
@@ -224,9 +225,8 @@ MAX_PROGRAM_AGE     default: 20000
 LOOP_MAX_DEPTH      default: 8
 TICKS_PER_STAT_LOG  default: 10000
 ENERGY_CURRENT      default: 17
-ENERGY_RAIN_WIDTH   default: 64
-ENERGY_RAIN_LIFE_BIAS default: 0.95
-ENERGY_RAIN_RADIUS  default: 96
+RESOURCE_SOURCES    default: four A/B emitters configured by offset, interval,
+                    amount, width, and velocity in soup.toml
 SEED_PROGRAM        default: built-in minimal replicator
 ```
 

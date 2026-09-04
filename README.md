@@ -7,7 +7,7 @@ The redesign gives evolution room to change more than byte values:
 - insertions, deletions, and gene-like span duplications change genome length;
 - the ancestor measures its current length, so resized descendants can still reproduce;
 - offspring usually occupy memory beside their parent, allowing persistent local ecologies;
-- A and B resources move in opposite currents, require different instructions, and can only be found locally;
+- A and B resources come from organism-independent fixed or moving sources, flow in opposite currents, require different instructions, and can only be found locally;
 - a heritable, mutable tag can be set and searched for by programs;
 - execution traces classify what a genome actually does, not merely how its bytes differ;
 - suspected partnerships can be tested in cloned worlds with either partner removed.
@@ -40,4 +40,4 @@ LOG_PATH=/tmp/soup.log cargo run --release --bin soup -- \
   --ticks 1000000 --test-symbiosis --symbiosis-horizon 100000
 ```
 
-Configuration lives in `soup.toml`. The other templates are retained as optional inoculations, but only `templates/01_ancestor.toml` has `seed = true` by default. Every default descendant therefore comes from the same minimal ancestor.
+Configuration lives in `soup.toml`. Resource sources have independently configurable chemistry, position, cadence, amount, width, and velocity. Their shared spatial origin is derived from `rng_seed`, and the ancestor is placed there so it can reach both chemistries without any source targeting live organisms. The other templates are retained as optional inoculations, but only `templates/01_ancestor.toml` has `seed = true` by default. Every default descendant therefore comes from the same minimal ancestor.
