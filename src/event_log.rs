@@ -1,7 +1,7 @@
+use crate::events::Event;
 use std::fs::OpenOptions;
 use std::io::{BufWriter, Write};
 use std::path::Path;
-use crate::events::Event;
 
 pub struct EventLog {
     writer: BufWriter<std::fs::File>,
@@ -9,10 +9,7 @@ pub struct EventLog {
 
 impl EventLog {
     pub fn open(path: &Path) -> std::io::Result<Self> {
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)?;
+        let file = OpenOptions::new().create(true).append(true).open(path)?;
         Ok(Self {
             writer: BufWriter::new(file),
         })

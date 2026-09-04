@@ -1,6 +1,6 @@
+use crate::program::ProgramId;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use crate::program::ProgramId;
 
 /// All observable events emitted by the simulation.
 ///
@@ -21,6 +21,7 @@ pub enum Event {
         start: u16,
         length: u16,
         energy: u32,
+        generation: u32,
     },
     Died {
         tick: u64,
@@ -32,6 +33,29 @@ pub enum Event {
         address: u16,
         old_value: u8,
         new_value: u8,
+    },
+    StructuralMutation {
+        tick: u64,
+        id: ProgramId,
+        parent_id: ProgramId,
+        kind: StructuralMutationKind,
+        index: u16,
+        old_length: u16,
+        new_length: u16,
+    },
+    TagChanged {
+        tick: u64,
+        id: ProgramId,
+        old_tag: u8,
+        new_tag: u8,
+    },
+    /// A resource deposited by one organism was consumed by another.
+    ResourceTransfer {
+        tick: u64,
+        donor_id: ProgramId,
+        receiver_id: ProgramId,
+        resource: ResourceKind,
+        amount: u32,
     },
     Committed {
         tick: u64,
@@ -56,8 +80,24 @@ pub enum Event {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum StructuralMutationKind {
+    Insertion,
+    Deletion,
+    Duplication,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourceKind {
+    A,
+    B,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DeathCause {
     Energy,
+    Senescence,
     Killed,
     Evicted,
 }

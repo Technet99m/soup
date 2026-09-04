@@ -13,7 +13,8 @@ A digital life simulation where self-replicating bytecode programs evolve inside
 - Memory is **circular** — address arithmetic wraps around
 - Programs occupy contiguous slices: `[start, start + length)`
 - A separate **program registry** maps program IDs to `{ start, length, age, energy }`
-- A parallel **energy map** (`[u32; 65536]`) holds deposited energy per cell, independent of instruction bytes. Programs can deposit energy (GIVE_ENERGY) for children or for themselves across cycles; other programs can sense (SENSE_ENERGY) and drain (TAKE_ENERGY) these deposits — enabling parasitic behavior to emerge.
+- Parallel **resource A** and **resource B** maps (`[u32; 65536]` each) hold deposits independently of instruction bytes. Each chemistry has distinct seek, sense, take, and give instructions.
+- A moves forward and B moves backward during decay sweeps. Counter-currents produce changing local resource conditions while conserving the combined energy budget.
 
 ---
 
@@ -57,7 +58,17 @@ Every possible byte value must map to a valid instruction. Group them:
 | 31 | `TAKE_ENERGY` | Drain all energy from energy map at read head into own pool. Costs 1 base. |
 | 32 | `SENSE_ENERGY` | Load energy map value at read head into register B (saturating at 65535). Costs 1 base. |
 | 33 | `MEASURE_SELF` | Load this program's registered length into register A. |
-| 34–254 | `NOP_*` | All treated as NOP (mutation-safe padding) |
+| 34 | `SET_READ_HEAD` | Set read head to register B |
+| 35 | `SEEK_FOREIGN_START` | Find memory owned by another live program |
+| 36 | `GIVE_ENERGY_IMM` | Deposit A resource at a two-byte immediate address |
+| 37 | `TAKE_RESOURCE_B` | Drain B resource at the read head into the energy pool |
+| 38 | `SENSE_RESOURCE_B` | Load B resource at the read head into register B |
+| 39 | `GIVE_RESOURCE_B` | Deposit register B energy as B resource at the write head |
+| 40 | `SEEK_RESOURCE_A` | Move the read head to the nearest A deposit |
+| 41 | `SEEK_RESOURCE_B` | Move the read head to the nearest B deposit |
+| 42 | `SET_TAG` | Set the organism's recognition tag from register A |
+| 43 | `SEEK_TAG` | Find another organism whose tag matches register A |
+| 44–254 | `NOP_*` | All treated as NOP |
 | 255 | `HALT` | Stop execution immediately |
 
 ---
@@ -84,9 +95,10 @@ LOOP — loop stack (max depth 8)
 - `ALLOC` costs **10 energy**
 - `COMMIT` / `SPLIT` costs **20 energy**
 - When energy reaches 0: program is **killed and memory freed**
+- An organism also wears out after a configurable instruction budget. This prevents sterile energy-hoarding loops from stopping generational turnover.
 - A program that successfully calls `COMMIT` passes a lineage record to the child
 
-This replaces age-based death. Survival requires efficient replication.
+Energy scarcity and finite body lifetime make survival through descendants require efficient replication.
 
 ---
 
@@ -102,18 +114,19 @@ This replaces age-based death. Survival requires efficient replication.
 
 ## 6. Mutation
 
-Applied at **write time** (when `WRITE` or `COPY` executes):
+Substitution is applied at **write time** (when `WRITE` or `COPY` executes):
 
 - **0.5% chance per byte written** of flipping the written value to a random u8
 - Mutation rate is a **configurable global parameter**
-- No other source of mutation — errors only enter through replication
+- At birth, independent configurable rates insert one byte, delete a 1–8 byte span, or duplicate a 1–8 byte span.
+- A child's inherited recognition tag can also mutate independently.
 
 ---
 
 ## 7. Memory Allocation
 
 - A **free list** tracks unoccupied memory ranges
-- `ALLOC` searches the free list for the best fit block
+- `ALLOC` usually chooses the closest fitting location to the parent; a configurable fraction uses global best fit
 - If no block is large enough: instruction is a no-op (costs energy anyway)
 - Freed memory is not zeroed — it retains old values (fossil data, potential parasite fuel)
 
@@ -121,21 +134,25 @@ Applied at **write time** (when `WRITE` or `COPY` executes):
 
 ## 8. The Seed Program
 
-The simulation starts with **one hand-written program** placed at address 0. It should be the simplest possible self-replicator:
+The simulation starts with **one hand-written 16-byte program**. It processes both resource types, measures its genome, copies that measured span, splits energy with the child, and loops:
 
 ```text
-SEEK_SELF_START     ; point read head at own start
-LOAD_IMM [own_len]  ; A = own length
+SEEK_RESOURCE_A
+TAKE_ENERGY
+SEEK_RESOURCE_B
+TAKE_RESOURCE_B
+MEASURE_SELF        ; A = current registered length
 ALLOC               ; find free block of that size, B = destination
 SET_WRITE_HEAD      ; WH = B
 SEEK_SELF_START     ; reset RH
-LOAD_IMM [own_len]  ; A = loop counter
+MEASURE_SELF        ; A = loop counter
 LOOP_OPEN           ;
   COPY              ; copy one byte RH→WH, advance both
 LOOP_CLOSE          ; repeat A times
-LOAD_IMM [own_len]  ; A = child size
-COMMIT              ; register new program at B
-HALT
+MEASURE_SELF        ; A = child size
+SPLIT               ; register child and split remaining energy
+MEASURE_SELF
+JMP_BWD             ; repeat
 ```
 
 This is the primordial ancestor. Evolution takes it from here.
@@ -156,7 +173,7 @@ COMMIT               ; child size comes from A
 
 - Each program has a `lineage_id` (UUID) and `parent_id`
 - On `COMMIT`/`SPLIT`: child inherits parent's lineage chain
-- Mutations are recorded as diffs at commit time
+- Substitutions and structural genome edits are emitted as events
 - This allows a **full evolutionary tree** to be reconstructed from logs
 
 ---
@@ -176,9 +193,12 @@ COMMITTED  { parent_id, child_id }
 ```text
 - Total live programs
 - Memory utilization %
-- Unique lineages alive
+- Distinct live genomes, generation depth, and byte distance from each startup ancestor
 - Most common instruction distribution
 - Oldest living program age (in ticks)
+- Per-organism execution counts, A/B harvests, A/B gifts, and tag searches
+- Donor provenance for resources consumed by a different genome
+- Counterfactual reproductive-rate change after removing either candidate partner
 ```
 
 ---
@@ -191,10 +211,22 @@ All as environment variables or a config file:
 MEMORY_SIZE         default: 65536
 INITIAL_ENERGY      default: 200
 MUTATION_RATE       default: 0.005
+INSERTION_RATE      default: 0.004 per birth
+DELETION_RATE       default: 0.004 per birth
+DUPLICATION_RATE    default: 0.004 per birth
+MAX_GENOME_LENGTH   default: 512
+CHILD_LOCALITY_BIAS default: 0.92
+TAG_MUTATION_RATE   default: 0.01
+INTERACTION_RADIUS  default: 256
 ALLOC_COST          default: 10
 COMMIT_COST         default: 20
+MAX_PROGRAM_AGE     default: 20000
 LOOP_MAX_DEPTH      default: 8
 TICKS_PER_STAT_LOG  default: 10000
+ENERGY_CURRENT      default: 17
+ENERGY_RAIN_WIDTH   default: 64
+ENERGY_RAIN_LIFE_BIAS default: 0.95
+ENERGY_RAIN_RADIUS  default: 96
 SEED_PROGRAM        default: built-in minimal replicator
 ```
 
@@ -211,9 +243,8 @@ SEED_PROGRAM        default: built-in minimal replicator
 
 ---
 
-## Out of Scope (for now)
+## Out of Scope
 
-- Visualization (add later)
 - Networking / distributed memory
 - Sexual recombination
 - Any fitness function — **there is no goal, only survival**

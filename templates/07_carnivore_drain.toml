@@ -1,5 +1,6 @@
 name = "carnivore_drain"
 description = "Injection parasite: finds a foreign program, overwrites its body with a GIVE_ENERGY_IMM payload that deposits energy to drop-zone address 0x0000, then harvests that drop zone. Energy flows victim → drop zone → self each time the victim executes the injected instruction."
+seed = false # hostile inoculation; enable explicitly for a predator experiment
 # 27 bytes:
 # Phase 1: inject [GIVE_ENERGY_IMM, 0x00, 0x00] at victim's address
 # [0]  SEEK_FOREIGN_START (35) — reg_b = foreign addr

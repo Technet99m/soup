@@ -1,15 +1,37 @@
-use std::collections::{HashMap, VecDeque};
-use rand::{Rng, SeedableRng, rngs::StdRng};
 use crate::{
     allocator::FreeList,
     config::Config,
-    events::{DeathCause, Event},
+    events::{DeathCause, Event, StructuralMutationKind},
     memory::Memory,
     program::{Program, ProgramId},
     template,
     vm::{self, StepResult},
 };
+use rand::{rngs::StdRng, Rng, SeedableRng};
+use std::collections::{HashMap, VecDeque};
 
+#[derive(Debug, Clone)]
+pub struct SymbiosisReport {
+    pub genome_a: u64,
+    pub genome_b: u64,
+    pub horizon: u64,
+    pub baseline_births_a: u64,
+    pub baseline_births_b: u64,
+    pub dependence_a: f64,
+    pub dependence_b: f64,
+    pub verdict: RelationshipVerdict,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelationshipVerdict {
+    Mutualism,
+    ADependsOnB,
+    BDependsOnA,
+    Competition,
+    Inconclusive,
+}
+
+#[derive(Clone)]
 pub struct World {
     pub memory: Memory,
     pub free_list: FreeList,
@@ -23,13 +45,33 @@ pub struct World {
     rng: StdRng,
     /// Names of the startup templates, indexed by template_id.
     pub template_names: Vec<String>,
-    /// The ambient energy pool — conserved total minus program energies and energy map.
+    /// Startup genomes, indexed by template_id, used as the evolutionary baseline.
+    pub template_bytes: Vec<Vec<u8>>,
+    /// The ambient energy pool — conserved total minus organism and deposited resources.
     /// Burns from instruction execution return here; drip deposits from here to the
-    /// energy map; deaths return remaining program energy here.
+    /// resource maps; deaths return remaining program energy here.
     pub ambient_pool: u64,
     /// Per-cell ownership map: addr_to_owner[addr] = Some(id) if a live program owns that byte.
     /// Kept in sync on spawn and death; used by SeekForeignStart and ForeignExec tracking.
     pub addr_to_owner: Box<[Option<ProgramId>]>,
+    /// Current tag by program ID. Dead IDs remain as harmless historical entries.
+    pub program_tags: Vec<u8>,
+    /// Successful reproduction attributed to the parent's current genome.
+    pub births_by_parent_genome: HashMap<u64, u64>,
+    /// Tick of the latest successful reproduction by each genome.
+    pub last_birth_by_genome: HashMap<u64, u64>,
+    /// Most recently observed genome for every program ID, retained after death.
+    pub genome_by_id: Vec<u64>,
+    /// Cross-genome resources consumed, keyed by (donor genome, receiver genome).
+    pub interactions: HashMap<(u64, u64), u64>,
+    /// Executed instructions attributed to the genome present before each step.
+    pub steps_by_genome: HashMap<u64, u64>,
+    pub total_births: u64,
+    pub total_deaths: u64,
+    pub total_mutations: u64,
+    pub total_foreign_execs: u64,
+    pub total_foreign_writes: u64,
+    pub max_generation: u32,
 }
 
 /// Build a FreeList covering all memory NOT occupied by the given placements.
@@ -72,7 +114,7 @@ impl World {
     pub fn new(config: Config) -> Self {
         let templates = template::load_templates(&config.templates_dir);
         let num = templates.len();
-        let mut startup_rng = rand::thread_rng();
+        let mut startup_rng = StdRng::seed_from_u64(config.rng_seed ^ 0x510a_f00d);
 
         let mut memory = Memory::new();
         let mut placements: Vec<(u16, u16)> = Vec::with_capacity(num);
@@ -122,17 +164,24 @@ impl World {
             queue.push_back(i as ProgramId);
         }
 
-        let template_names = templates.into_iter().map(|t| t.name).collect();
+        let template_names = templates.iter().map(|t| t.name.clone()).collect();
+        let template_bytes = templates.into_iter().map(|t| t.bytes).collect();
 
         let seed_energy: u64 = programs.values().map(|p| p.energy as u64).sum();
         let ambient_pool = config.total_energy.saturating_sub(seed_energy);
 
         let mut addr_to_owner: Box<[Option<ProgramId>]> = vec![None; 65536].into_boxed_slice();
+        let mut program_tags = vec![0; num];
         for prog in programs.values() {
             for offset in 0..prog.length as usize {
                 let addr = (prog.start as usize + offset) % 65536;
                 addr_to_owner[addr] = Some(prog.id);
             }
+            program_tags[prog.id as usize] = prog.tag;
+        }
+        let mut genome_by_id = vec![0; num];
+        for program in programs.values() {
+            genome_by_id[program.id as usize] = genome_hash_in_memory(&memory, program);
         }
 
         World {
@@ -145,8 +194,21 @@ impl World {
             tick: 0,
             next_id: num as ProgramId,
             template_names,
+            template_bytes,
             ambient_pool,
             addr_to_owner,
+            program_tags,
+            births_by_parent_genome: HashMap::new(),
+            last_birth_by_genome: HashMap::new(),
+            genome_by_id,
+            interactions: HashMap::new(),
+            steps_by_genome: HashMap::new(),
+            total_births: 0,
+            total_deaths: 0,
+            total_mutations: 0,
+            total_foreign_execs: 0,
+            total_foreign_writes: 0,
+            max_generation: 0,
         }
     }
 
@@ -156,25 +218,68 @@ impl World {
         self.tick += 1;
         let mut events = Vec::new();
 
-        // Periodic energy map decay: return decayed energy to ambient pool.
+        // Periodic resource decay: return decayed energy to the ambient pool.
         let decay_interval = self.config.energy_decay_interval;
-        if decay_interval > 0 && self.tick % decay_interval == 0 {
+        if decay_interval > 0 && self.tick.is_multiple_of(decay_interval) {
             let rate = self.config.energy_decay_rate;
-            for cell in self.memory.energy_map.iter_mut() {
+            for (index, cell) in self.memory.energy_map.iter_mut().enumerate() {
                 let decay = (*cell).min(rate);
                 *cell -= decay;
+                if *cell == 0 {
+                    self.memory.resource_a_donor[index] = None;
+                }
                 self.ambient_pool += decay as u64;
             }
+            for (index, cell) in self.memory.resource_b_map.iter_mut().enumerate() {
+                let decay = (*cell).min(rate);
+                *cell -= decay;
+                if *cell == 0 {
+                    self.memory.resource_b_donor[index] = None;
+                }
+                self.ambient_pool += decay as u64;
+            }
+            let current = self.config.energy_current % self.memory.energy_map.len();
+            self.memory.energy_map.rotate_right(current);
+            self.memory.resource_a_donor.rotate_right(current);
+            self.memory.resource_b_map.rotate_left(current);
+            self.memory.resource_b_donor.rotate_left(current);
         }
 
         // Periodic ambient drip: deposit a chunk from ambient pool to a random cell.
         let drip_interval = self.config.ambient_drip_interval;
-        if drip_interval > 0 && self.tick % drip_interval == 0 {
+        if drip_interval > 0 && self.tick.is_multiple_of(drip_interval) {
             let amount = (self.config.ambient_drip_amount as u64).min(self.ambient_pool) as u32;
             if amount > 0 {
                 use rand::Rng;
-                let addr = self.rng.gen::<u16>();
-                self.memory.give_energy(addr, amount);
+                let global_start = self.rng.gen::<u16>();
+                let width = self.config.energy_rain_width.clamp(1, 65536);
+                let start = if !self.programs.is_empty()
+                    && self.rng.gen::<f64>() < self.config.energy_rain_life_bias.clamp(0.0, 1.0)
+                {
+                    let index = self.rng.gen_range(0..self.programs.len());
+                    let mut ids: Vec<_> = self.programs.keys().copied().collect();
+                    ids.sort_unstable();
+                    let organism_start = self.programs[&ids[index]].start;
+                    let radius = self.config.energy_rain_radius as i32;
+                    let offset = self.rng.gen_range(-radius..=radius);
+                    organism_start.wrapping_add(offset as u16)
+                } else {
+                    global_start
+                };
+                let base = amount / width as u32;
+                let remainder = amount % width as u32;
+                let resource_b = (self.tick / drip_interval).is_multiple_of(2);
+                for offset in 0..width {
+                    let share = base + u32::from((offset as u32) < remainder);
+                    if share > 0 {
+                        let addr = start.wrapping_add(offset as u16);
+                        if resource_b {
+                            self.memory.give_resource_b(addr, share);
+                        } else {
+                            self.memory.give_energy(addr, share);
+                        }
+                    }
+                }
                 self.ambient_pool -= amount as u64;
             }
         }
@@ -203,18 +308,67 @@ impl World {
             }
         }
 
+        let executing_hash = self
+            .programs
+            .get(&id)
+            .map(|program| self.genome_hash(program))
+            .unwrap_or(0);
+        if let Some(genome) = self.genome_by_id.get_mut(id as usize) {
+            *genome = executing_hash;
+        }
+        *self.steps_by_genome.entry(executing_hash).or_default() += 1;
         let result = {
             let p = self.programs.get_mut(&id).unwrap();
-            vm::step(p, &mut self.memory, &mut self.free_list, &self.addr_to_owner, &self.config, &mut self.next_id, &mut self.rng, &mut events, self.tick, &mut self.ambient_pool)
+            vm::step(
+                p,
+                &mut self.memory,
+                &mut self.free_list,
+                &self.addr_to_owner,
+                &self.program_tags,
+                &self.config,
+                &mut self.next_id,
+                &mut self.rng,
+                &mut events,
+                self.tick,
+                &mut self.ambient_pool,
+            )
         };
+        if let Some(program) = self.programs.get(&id) {
+            if let Some(tag) = self.program_tags.get_mut(id as usize) {
+                *tag = program.tag;
+            }
+        }
 
         match result {
             StepResult::Continue => {
-                self.queue.push_back(id);
+                let senescent = self.config.max_program_age > 0
+                    && self.programs[&id].age >= self.config.max_program_age;
+                if senescent {
+                    if let Some(p) = self.programs.remove(&id) {
+                        if let Some((start, length)) = p.pending_allocation {
+                            self.free_list.free(start, length);
+                        }
+                        for offset in 0..p.length as usize {
+                            self.addr_to_owner[(p.start as usize + offset) % 65536] = None;
+                        }
+                        self.ambient_pool += p.energy as u64;
+                        self.free_list.free(p.start, p.length);
+                        events.push(Event::Died {
+                            tick: self.tick,
+                            id,
+                            cause: DeathCause::Senescence,
+                        });
+                    }
+                } else {
+                    self.queue.push_back(id);
+                }
             }
             StepResult::Halted => {
                 // Program executed HALT — return remaining energy to ambient, free memory.
                 if let Some(p) = self.programs.remove(&id) {
+                    if let Some((start, length)) = p.pending_allocation {
+                        self.free_list.free(start, length);
+                    }
                     for offset in 0..p.length as usize {
                         self.addr_to_owner[(p.start as usize + offset) % 65536] = None;
                     }
@@ -230,6 +384,9 @@ impl World {
             StepResult::OutOfEnergy => {
                 // Energy is 0 (all burned to ambient via step()); nothing to return.
                 if let Some(p) = self.programs.remove(&id) {
+                    if let Some((start, length)) = p.pending_allocation {
+                        self.free_list.free(start, length);
+                    }
                     for offset in 0..p.length as usize {
                         self.addr_to_owner[(p.start as usize + offset) % 65536] = None;
                     }
@@ -242,9 +399,16 @@ impl World {
                     });
                 }
             }
-            StepResult::Spawned(child) => {
-                // Phase 4: handle child registration.
-                // For now (should not occur in Phase 3), just re-queue parent.
+            StepResult::Spawned(mut child) => {
+                let parent_hash = self
+                    .programs
+                    .get(&id)
+                    .map(|parent| self.genome_hash(parent))
+                    .unwrap_or(0);
+                *self.births_by_parent_genome.entry(parent_hash).or_default() += 1;
+                self.last_birth_by_genome.insert(parent_hash, self.tick);
+                let parent_start = self.programs[&id].start;
+                self.apply_birth_mutations(&mut child, parent_start, &mut events);
                 events.push(Event::Born {
                     tick: self.tick,
                     id: child.id,
@@ -254,6 +418,7 @@ impl World {
                     start: child.start,
                     length: child.length,
                     energy: child.energy,
+                    generation: child.generation,
                 });
                 events.push(Event::Committed {
                     tick: self.tick,
@@ -261,6 +426,14 @@ impl World {
                     child_id: child.id,
                 });
                 let child_id = child.id;
+                if self.program_tags.len() <= child_id as usize {
+                    self.program_tags.resize(child_id as usize + 1, 0);
+                }
+                self.program_tags[child_id as usize] = child.tag;
+                if self.genome_by_id.len() <= child_id as usize {
+                    self.genome_by_id.resize(child_id as usize + 1, 0);
+                }
+                self.genome_by_id[child_id as usize] = self.genome_hash(&child);
                 for offset in 0..child.length as usize {
                     self.addr_to_owner[(child.start as usize + offset) % 65536] = Some(child_id);
                 }
@@ -270,7 +443,152 @@ impl World {
             }
         }
 
+        for event in &events {
+            match event {
+                Event::Born { generation, .. } => {
+                    self.total_births += 1;
+                    self.max_generation = self.max_generation.max(*generation);
+                }
+                Event::Died { .. } => self.total_deaths += 1,
+                Event::Mutated { .. } => self.total_mutations += 1,
+                Event::StructuralMutation { .. } => self.total_mutations += 1,
+                Event::ForeignExec { .. } => self.total_foreign_execs += 1,
+                Event::ForeignWrite { .. } => self.total_foreign_writes += 1,
+                Event::ResourceTransfer {
+                    donor_id,
+                    receiver_id,
+                    amount,
+                    ..
+                } => {
+                    let donor = self.genome_by_id.get(*donor_id as usize).copied();
+                    let receiver = self.genome_by_id.get(*receiver_id as usize).copied();
+                    if let (Some(donor), Some(receiver)) = (donor, receiver) {
+                        if donor != receiver {
+                            *self.interactions.entry((donor, receiver)).or_default() +=
+                                *amount as u64;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
         events
+    }
+
+    fn apply_birth_mutations(
+        &mut self,
+        child: &mut Program,
+        parent_start: u16,
+        events: &mut Vec<Event>,
+    ) {
+        let roll = self.rng.gen::<f64>();
+        let insert_edge = self.config.insertion_rate.max(0.0);
+        let delete_edge = insert_edge + self.config.deletion_rate.max(0.0);
+        let duplicate_edge = delete_edge + self.config.duplication_rate.max(0.0);
+        let kind = if roll < insert_edge {
+            Some(StructuralMutationKind::Insertion)
+        } else if roll < delete_edge {
+            Some(StructuralMutationKind::Deletion)
+        } else if roll < duplicate_edge {
+            Some(StructuralMutationKind::Duplication)
+        } else {
+            None
+        };
+
+        if let Some(kind) = kind {
+            let old_length = child.length;
+            let mut genome = self.memory.read_slice(child.start, child.length);
+            let mut mutation_index = 0usize;
+            match kind {
+                StructuralMutationKind::Insertion
+                    if child.length < self.config.max_genome_length =>
+                {
+                    mutation_index = self.rng.gen_range(0..=genome.len());
+                    genome.insert(mutation_index, self.rng.gen());
+                }
+                StructuralMutationKind::Deletion if genome.len() > 4 => {
+                    mutation_index = self.rng.gen_range(0..genome.len());
+                    let max_span = 8usize
+                        .min(genome.len() - mutation_index)
+                        .min(genome.len() - 4);
+                    let span = self.rng.gen_range(1..=max_span);
+                    genome.drain(mutation_index..mutation_index + span);
+                }
+                StructuralMutationKind::Duplication
+                    if child.length < self.config.max_genome_length =>
+                {
+                    let remaining = self.config.max_genome_length as usize - genome.len();
+                    let max_span = 8usize.min(genome.len()).min(remaining);
+                    if max_span > 0 {
+                        let span = self.rng.gen_range(1..=max_span);
+                        let source = self.rng.gen_range(0..=genome.len() - span);
+                        let duplicate = genome[source..source + span].to_vec();
+                        mutation_index = self.rng.gen_range(0..=genome.len());
+                        genome.splice(mutation_index..mutation_index, duplicate);
+                    }
+                }
+                _ => {}
+            }
+
+            let new_length = genome.len() as u16;
+            if new_length != old_length && self.install_resized_genome(child, parent_start, &genome)
+            {
+                child.ip = child.start;
+                child.rh = child.start;
+                child.wh = child.start;
+                child.loop_stack.clear();
+                events.push(Event::StructuralMutation {
+                    tick: self.tick,
+                    id: child.id,
+                    parent_id: child.parent_id.unwrap_or_default(),
+                    kind,
+                    index: mutation_index as u16,
+                    old_length,
+                    new_length,
+                });
+            }
+        }
+
+        if self.rng.gen::<f64>() < self.config.tag_mutation_rate.clamp(0.0, 1.0) {
+            let old_tag = child.tag;
+            let mut new_tag = self.rng.gen::<u8>();
+            if new_tag == old_tag {
+                new_tag = new_tag.wrapping_add(1);
+            }
+            child.tag = new_tag;
+            events.push(Event::TagChanged {
+                tick: self.tick,
+                id: child.id,
+                old_tag,
+                new_tag,
+            });
+        }
+    }
+
+    fn install_resized_genome(
+        &mut self,
+        child: &mut Program,
+        parent_start: u16,
+        genome: &[u8],
+    ) -> bool {
+        let new_length = genome.len() as u16;
+        if new_length > child.length {
+            let Some(new_start) = self.free_list.alloc_near(parent_start, new_length) else {
+                return false;
+            };
+            self.memory.place(new_start, genome);
+            self.free_list.free(child.start, child.length);
+            child.start = new_start;
+        } else {
+            self.memory.place(child.start, genome);
+            self.free_list.free(
+                child.start.wrapping_add(new_length),
+                child.length - new_length,
+            );
+        }
+        child.length = new_length;
+        true
     }
 
     /// Run for `n` ticks, collecting all events.
@@ -292,6 +610,247 @@ impl World {
         let free = self.free_list.free_bytes() as f64;
         1.0 - free / 65536.0
     }
+
+    /// Stable fingerprint of an organism's current bytes. Equal hashes are exact
+    /// genotypes for the purposes of the live observer.
+    pub fn genome_hash(&self, program: &Program) -> u64 {
+        genome_hash_in_memory(&self.memory, program)
+    }
+
+    pub fn live_genomes(&self) -> usize {
+        self.programs
+            .values()
+            .map(|program| self.genome_hash(program))
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+    }
+
+    /// Byte distance from the startup genome that founded this organism's clade.
+    pub fn ancestor_distance(&self, program: &Program) -> usize {
+        let Some(template_id) = program.template_id else {
+            return 0;
+        };
+        let Some(ancestor) = self.template_bytes.get(template_id as usize) else {
+            return 0;
+        };
+        let genome = self.memory.read_slice(program.start, program.length);
+        let substitutions = genome.iter().zip(ancestor).filter(|(a, b)| a != b).count();
+        substitutions + genome.len().abs_diff(ancestor.len())
+    }
+
+    /// Pick the strongest live candidate pair, preferring abundant genomes with
+    /// opposite A/B harvesting profiles. This is only hypothesis generation;
+    /// `counterfactual_symbiosis` performs the actual removal experiment.
+    pub fn candidate_partner_pair(&self) -> Option<(u64, u64)> {
+        let live_hashes: std::collections::HashSet<_> = self
+            .programs
+            .values()
+            .map(|program| self.genome_hash(program))
+            .collect();
+        let mut transferred_by_pair: HashMap<(u64, u64), u64> = HashMap::new();
+        for (&(donor, receiver), &amount) in &self.interactions {
+            let active = |hash: u64| {
+                self.births_by_parent_genome
+                    .get(&hash)
+                    .is_some_and(|births| *births >= 2)
+                    && self
+                        .last_birth_by_genome
+                        .get(&hash)
+                        .is_some_and(|tick| self.tick.saturating_sub(*tick) <= 100_000)
+            };
+            if donor != receiver
+                && live_hashes.contains(&donor)
+                && live_hashes.contains(&receiver)
+                && active(donor)
+                && active(receiver)
+            {
+                let pair = if donor < receiver {
+                    (donor, receiver)
+                } else {
+                    (receiver, donor)
+                };
+                *transferred_by_pair.entry(pair).or_default() += amount;
+            }
+        }
+        if let Some((pair, _)) = transferred_by_pair
+            .into_iter()
+            .max_by_key(|(_, amount)| *amount)
+        {
+            return Some(pair);
+        }
+
+        #[derive(Default)]
+        struct Phenotype {
+            population: u64,
+            a: u64,
+            b: u64,
+            births: u64,
+        }
+        let mut phenotypes: HashMap<u64, Phenotype> = HashMap::new();
+        for program in self.programs.values() {
+            let hash = self.genome_hash(program);
+            let phenotype = phenotypes.entry(hash).or_default();
+            phenotype.population += 1;
+            phenotype.a += program.trace.opcode_counts[31];
+            phenotype.b += program.trace.opcode_counts[37];
+            phenotype.births = self
+                .births_by_parent_genome
+                .get(&hash)
+                .copied()
+                .unwrap_or(0);
+        }
+        let mut live: Vec<_> = phenotypes.into_iter().collect();
+        let has_active_pair = live
+            .iter()
+            .filter(|(hash, phenotype)| {
+                phenotype.births >= 2
+                    && self
+                        .last_birth_by_genome
+                        .get(hash)
+                        .is_some_and(|tick| self.tick.saturating_sub(*tick) <= 100_000)
+            })
+            .count()
+            >= 2;
+        if has_active_pair {
+            live.retain(|(hash, phenotype)| {
+                phenotype.births >= 2
+                    && self
+                        .last_birth_by_genome
+                        .get(hash)
+                        .is_some_and(|tick| self.tick.saturating_sub(*tick) <= 100_000)
+            });
+        }
+        live.sort_by_key(|(_, phenotype)| std::cmp::Reverse(phenotype.population));
+        live.truncate(12);
+
+        let mut best = None;
+        for left in 0..live.len() {
+            for right in left + 1..live.len() {
+                let (hash_a, a) = &live[left];
+                let (hash_b, b) = &live[right];
+                let preference_a = a.a as f64 / (a.a + a.b).max(1) as f64;
+                let preference_b = b.a as f64 / (b.a + b.b).max(1) as f64;
+                let complement = (preference_a - preference_b).abs();
+                let abundance = a.population.min(b.population) as f64;
+                let reproductive_evidence = a.births.min(b.births) as f64;
+                let score = abundance * 1_000_000.0
+                    + reproductive_evidence * 1_000.0
+                    + complement * 10_000.0;
+                if best.is_none_or(|(_, _, best_score)| score > best_score) {
+                    best = Some((*hash_a, *hash_b, score));
+                }
+            }
+        }
+        best.map(|(a, b, _)| (a, b))
+    }
+
+    /// Clone the present ecosystem three ways: intact, without B, and without A.
+    /// Reproduction is normalized by instructions executed, preventing the
+    /// removed organisms' freed CPU share from masquerading as a benefit.
+    pub fn counterfactual_symbiosis(&self, horizon: u64) -> Option<SymbiosisReport> {
+        let (genome_a, genome_b) = self.candidate_partner_pair()?;
+        let mut intact = self.clone();
+        let mut without_b = self.clone();
+        let mut without_a = self.clone();
+        without_b.remove_genome(genome_b);
+        without_a.remove_genome(genome_a);
+
+        let intact_before = intact.measure_genomes(genome_a, genome_b);
+        let without_b_before = without_b.measure_genomes(genome_a, genome_b);
+        let without_a_before = without_a.measure_genomes(genome_a, genome_b);
+        for _ in 0..horizon {
+            intact.tick();
+            without_b.tick();
+            without_a.tick();
+        }
+        let intact_after = intact.measure_genomes(genome_a, genome_b);
+        let without_b_after = without_b.measure_genomes(genome_a, genome_b);
+        let without_a_after = without_a.measure_genomes(genome_a, genome_b);
+
+        let baseline_a = intact_after.0.saturating_sub(intact_before.0);
+        let baseline_b = intact_after.1.saturating_sub(intact_before.1);
+        let no_b_a = without_b_after.0.saturating_sub(without_b_before.0);
+        let no_a_b = without_a_after.1.saturating_sub(without_a_before.1);
+        let baseline_steps_a = intact_after.2.saturating_sub(intact_before.2);
+        let baseline_steps_b = intact_after.3.saturating_sub(intact_before.3);
+        let no_b_steps_a = without_b_after.2.saturating_sub(without_b_before.2);
+        let no_a_steps_b = without_a_after.3.saturating_sub(without_a_before.3);
+        let baseline_rate_a = baseline_a as f64 / baseline_steps_a.max(1) as f64;
+        let baseline_rate_b = baseline_b as f64 / baseline_steps_b.max(1) as f64;
+        let no_b_rate_a = no_b_a as f64 / no_b_steps_a.max(1) as f64;
+        let no_a_rate_b = no_a_b as f64 / no_a_steps_b.max(1) as f64;
+        let dependence_a = relative_loss(baseline_rate_a, no_b_rate_a);
+        let dependence_b = relative_loss(baseline_rate_b, no_a_rate_b);
+        let enough_evidence = baseline_a >= 2 && baseline_b >= 2;
+        let a_depends = enough_evidence && dependence_a >= 0.2;
+        let b_depends = enough_evidence && dependence_b >= 0.2;
+        let verdict = match (a_depends, b_depends) {
+            (true, true) => RelationshipVerdict::Mutualism,
+            (true, false) => RelationshipVerdict::ADependsOnB,
+            (false, true) => RelationshipVerdict::BDependsOnA,
+            (false, false) if enough_evidence && dependence_a <= -0.2 && dependence_b <= -0.2 => {
+                RelationshipVerdict::Competition
+            }
+            _ => RelationshipVerdict::Inconclusive,
+        };
+        Some(SymbiosisReport {
+            genome_a,
+            genome_b,
+            horizon,
+            baseline_births_a: baseline_a,
+            baseline_births_b: baseline_b,
+            dependence_a,
+            dependence_b,
+            verdict,
+        })
+    }
+
+    fn measure_genomes(&self, a: u64, b: u64) -> (u64, u64, u64, u64) {
+        (
+            self.births_by_parent_genome.get(&a).copied().unwrap_or(0),
+            self.births_by_parent_genome.get(&b).copied().unwrap_or(0),
+            self.steps_by_genome.get(&a).copied().unwrap_or(0),
+            self.steps_by_genome.get(&b).copied().unwrap_or(0),
+        )
+    }
+
+    fn remove_genome(&mut self, genome: u64) {
+        let ids: Vec<_> = self
+            .programs
+            .values()
+            .filter(|program| self.genome_hash(program) == genome)
+            .map(|program| program.id)
+            .collect();
+        for id in ids {
+            if let Some(program) = self.programs.remove(&id) {
+                if let Some((start, length)) = program.pending_allocation {
+                    self.free_list.free(start, length);
+                }
+                for offset in 0..program.length {
+                    self.addr_to_owner[program.start.wrapping_add(offset) as usize] = None;
+                }
+                self.free_list.free(program.start, program.length);
+                self.ambient_pool += program.energy as u64;
+            }
+        }
+    }
+}
+
+fn relative_loss(baseline: f64, counterfactual: f64) -> f64 {
+    if baseline <= f64::EPSILON {
+        0.0
+    } else {
+        ((baseline - counterfactual) / baseline).clamp(-10.0, 1.0)
+    }
+}
+
+fn genome_hash_in_memory(memory: &Memory, program: &Program) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in memory.read_slice(program.start, program.length) {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash ^ program.length as u64
 }
 
 #[cfg(test)]
@@ -302,9 +861,10 @@ mod tests {
     /// Config that skips the templates directory so tests always fall back to the
     /// hardcoded SEED (single program, deterministic initial state).
     fn seed_config() -> Config {
-        let mut cfg = Config::default();
-        cfg.templates_dir = PathBuf::from("/nonexistent_soup_test_templates");
-        cfg
+        Config {
+            templates_dir: PathBuf::from("/nonexistent_soup_test_templates"),
+            ..Config::default()
+        }
     }
 
     #[test]
@@ -312,7 +872,7 @@ mod tests {
         let world = World::new(seed_config());
         assert_eq!(world.live_count(), 1);
         assert!(world.memory_utilization() > 0.0);
-        // Seed (looper) is 32 bytes out of 65536
+        // The single ancestor occupies exactly its genome length.
         let expected_util = crate::seed::SEED_LEN as f64 / 65536.0;
         assert!((world.memory_utilization() - expected_util).abs() < 0.0001);
     }
@@ -324,6 +884,22 @@ mod tests {
         assert_eq!(world.tick, 1);
         world.tick();
         assert_eq!(world.tick, 2);
+    }
+
+    #[test]
+    fn energy_current_moves_deposits_around_the_ring() {
+        let mut cfg = seed_config();
+        cfg.ambient_drip_interval = 0;
+        cfg.energy_decay_interval = 1;
+        cfg.energy_decay_rate = 0;
+        cfg.energy_current = 17;
+        let mut world = World::new(cfg);
+        world.memory.give_energy(60_000, 123);
+
+        world.tick();
+
+        assert_eq!(world.memory.sense_energy(60_000), 0);
+        assert_eq!(world.memory.sense_energy(60_017), 123);
     }
 
     #[test]
@@ -351,6 +927,26 @@ mod tests {
     }
 
     #[test]
+    fn organisms_senesce_after_their_instruction_budget() {
+        let mut cfg = seed_config();
+        cfg.max_program_age = 3;
+        cfg.initial_energy = 100;
+        cfg.ambient_drip_interval = 0;
+        let mut world = World::new(cfg);
+
+        let events = world.run(3);
+
+        assert!(events.iter().any(|event| matches!(
+            event,
+            Event::Died {
+                cause: DeathCause::Senescence,
+                ..
+            }
+        )));
+        assert_eq!(world.live_count(), 0);
+    }
+
+    #[test]
     fn seed_replicates_at_least_once() {
         // With enough energy and free memory, seed should COMMIT at least one child.
         let mut cfg = seed_config();
@@ -373,6 +969,8 @@ mod tests {
             }
         }
         assert!(children_born > 0, "Seed should replicate at least once");
+        assert!(world.total_births > 0);
+        assert!(world.max_generation >= 1);
     }
 
     #[test]
@@ -399,6 +997,115 @@ mod tests {
             }
         }
         assert!(mutation_count > 0, "Should observe mutations with rate=1.0");
+        assert!(world.total_mutations > 0);
+    }
+
+    #[test]
+    fn insertion_mutation_changes_child_length_and_stays_local() {
+        let mut cfg = seed_config();
+        cfg.initial_energy = 10_000;
+        cfg.mutation_rate = 0.0;
+        cfg.insertion_rate = 1.0;
+        cfg.deletion_rate = 0.0;
+        cfg.duplication_rate = 0.0;
+        cfg.tag_mutation_rate = 0.0;
+        cfg.child_locality_bias = 1.0;
+        let mut world = World::new(cfg);
+        let parent_start = world.programs[&0].start;
+        let mut child = None;
+
+        for _ in 0..10_000 {
+            for event in world.tick() {
+                if let Event::StructuralMutation {
+                    id,
+                    kind: StructuralMutationKind::Insertion,
+                    old_length,
+                    new_length,
+                    ..
+                } = event
+                {
+                    child = Some(id);
+                    assert_eq!(old_length, crate::seed::SEED_LEN);
+                    assert_eq!(new_length, crate::seed::SEED_LEN + 1);
+                }
+            }
+            if child.is_some() {
+                break;
+            }
+        }
+
+        let child = &world.programs[&child.expect("an insertion-bearing child")];
+        let distance = child
+            .start
+            .wrapping_sub(parent_start)
+            .min(parent_start.wrapping_sub(child.start));
+        assert!(distance <= crate::seed::SEED_LEN + 1);
+    }
+
+    #[test]
+    fn deletion_mutation_shortens_the_committed_genome() {
+        let mut cfg = seed_config();
+        cfg.initial_energy = 10_000;
+        cfg.mutation_rate = 0.0;
+        cfg.insertion_rate = 0.0;
+        cfg.deletion_rate = 1.0;
+        cfg.duplication_rate = 0.0;
+        cfg.tag_mutation_rate = 0.0;
+        let mut world = World::new(cfg);
+
+        let event = (0..10_000).find_map(|_| {
+            world.tick().into_iter().find(|event| {
+                matches!(
+                    event,
+                    Event::StructuralMutation {
+                        kind: StructuralMutationKind::Deletion,
+                        ..
+                    }
+                )
+            })
+        });
+        let Event::StructuralMutation {
+            old_length,
+            new_length,
+            ..
+        } = event.expect("a deletion-bearing child")
+        else {
+            unreachable!()
+        };
+        assert!(new_length < old_length);
+    }
+
+    #[test]
+    fn duplication_mutation_expands_the_committed_genome() {
+        let mut cfg = seed_config();
+        cfg.initial_energy = 10_000;
+        cfg.mutation_rate = 0.0;
+        cfg.insertion_rate = 0.0;
+        cfg.deletion_rate = 0.0;
+        cfg.duplication_rate = 1.0;
+        cfg.tag_mutation_rate = 0.0;
+        let mut world = World::new(cfg);
+
+        let event = (0..10_000).find_map(|_| {
+            world.tick().into_iter().find(|event| {
+                matches!(
+                    event,
+                    Event::StructuralMutation {
+                        kind: StructuralMutationKind::Duplication,
+                        ..
+                    }
+                )
+            })
+        });
+        let Event::StructuralMutation {
+            old_length,
+            new_length,
+            ..
+        } = event.expect("a duplication-bearing child")
+        else {
+            unreachable!()
+        };
+        assert!(new_length > old_length);
     }
 
     #[test]
@@ -410,7 +1117,8 @@ mod tests {
         cfg.mutation_rate = 0.0; // no mutation — pure replication test
         let mut world = World::new(cfg);
 
-        let mut generations: std::collections::HashSet<crate::program::ProgramId> = std::collections::HashSet::new();
+        let mut generations: std::collections::HashSet<crate::program::ProgramId> =
+            std::collections::HashSet::new();
         let mut grandchildren_born = 0usize;
 
         for _ in 0..500_000 {
@@ -433,7 +1141,11 @@ mod tests {
                 break;
             }
         }
-        assert!(grandchildren_born > 0, "Should observe at least one grandchild");
+        assert!(
+            grandchildren_born > 0,
+            "Should observe at least one grandchild"
+        );
+        assert!(world.max_generation >= 2);
     }
 
     #[test]

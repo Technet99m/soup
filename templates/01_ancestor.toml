@@ -1,0 +1,4 @@
+name = "ancestor"
+description = "Single 16-byte, length-adaptive ancestor. It can process both resource chemistries; every later strategy must evolve from this genome."
+seed = true
+bytes = [40, 31, 41, 37, 33, 25, 11, 5, 33, 23, 10, 24, 33, 27, 33, 20]

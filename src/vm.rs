@@ -1,12 +1,12 @@
-use rand::Rng;
 use crate::{
     allocator::FreeList,
     config::Config,
-    events::Event,
+    events::{Event, ResourceKind},
     memory::Memory,
     opcode::Opcode,
     program::{Program, ProgramId},
 };
+use rand::Rng;
 
 /// Result of executing one instruction.
 #[derive(Debug)]
@@ -32,11 +32,13 @@ pub enum StepResult {
 /// - COMMIT/SPLIT deduct additional `cfg.commit_cost` similarly.
 /// - age is incremented by 1 on every successful step (Continue and Halted),
 ///   but NOT on OutOfEnergy.
+#[allow(clippy::too_many_arguments)]
 pub fn step(
     p: &mut Program,
     mem: &mut Memory,
     fl: &mut FreeList,
     addr_to_owner: &[Option<ProgramId>],
+    program_tags: &[u8],
     cfg: &Config,
     next_id: &mut ProgramId,
     rng: &mut impl Rng,
@@ -52,7 +54,9 @@ pub fn step(
     p.energy -= 1;
     *ambient += 1;
 
-    let opcode = Opcode::from(mem.read(p.ip));
+    let raw_opcode = mem.read(p.ip);
+    let opcode = Opcode::from(raw_opcode);
+    p.trace.record(raw_opcode);
     let ip = p.ip;
     // Default: advance IP by 1.  Individual opcodes may override ip_next.
     let mut ip_next = ip.wrapping_add(1);
@@ -64,8 +68,8 @@ pub fn step(
         Opcode::MovFwd => p.rh = p.rh.wrapping_add(1),
         Opcode::MovBwd => p.rh = p.rh.wrapping_sub(1),
         // Move read-head forward/backward by reg_a bytes.
-        Opcode::MovFwdN => p.rh = p.rh.wrapping_add(p.reg_a as u16),
-        Opcode::MovBwdN => p.rh = p.rh.wrapping_sub(p.reg_a as u16),
+        Opcode::MovFwdN => p.rh = p.rh.wrapping_add(p.reg_a),
+        Opcode::MovBwdN => p.rh = p.rh.wrapping_sub(p.reg_a),
 
         // --- Head positioning ---
         Opcode::SeekSelfStart => p.rh = p.start,
@@ -99,7 +103,8 @@ pub fn step(
                     }
                 }
             }
-            let (stored, mutated) = mem.write_mutating(p.wh, (p.reg_a & 0xFF) as u8, rng, cfg.mutation_rate);
+            let (stored, mutated) =
+                mem.write_mutating(p.wh, (p.reg_a & 0xFF) as u8, rng, cfg.mutation_rate);
             if mutated {
                 events.push(Event::Mutated {
                     tick,
@@ -155,9 +160,7 @@ pub fn step(
 
         // SWAP: exchange reg_a and reg_b.
         Opcode::Swap => {
-            let old_a = p.reg_a;
-            p.reg_a = p.reg_b;
-            p.reg_b = old_a;
+            std::mem::swap(&mut p.reg_a, &mut p.reg_b);
         }
 
         // --- Jumps ---
@@ -230,9 +233,19 @@ pub fn step(
             if p.energy >= cfg.alloc_cost {
                 p.energy -= cfg.alloc_cost;
                 *ambient += cfg.alloc_cost as u64;
+                if let Some((start, length)) = p.pending_allocation.take() {
+                    fl.free(start, length);
+                }
                 if p.reg_a > 0 {
-                    if let Some(addr) = fl.alloc(p.reg_a) {
+                    let local = rng.gen::<f64>() < cfg.child_locality_bias.clamp(0.0, 1.0);
+                    let allocation = if local {
+                        fl.alloc_near(p.start, p.reg_a)
+                    } else {
+                        fl.alloc(p.reg_a)
+                    };
+                    if let Some(addr) = allocation {
                         p.reg_b = addr;
+                        p.pending_allocation = Some((addr, p.reg_a));
                     }
                     // No fitting block: reg_b unchanged, but extra cost already paid.
                 }
@@ -244,9 +257,12 @@ pub fn step(
         Opcode::Commit => {
             let child_start = p.reg_b;
             let child_len = p.reg_a;
-            if child_len > 0
-                && p.energy >= cfg.commit_cost
-                && !fl.is_free(child_start, child_len)
+            let allocated_len = p
+                .pending_allocation
+                .filter(|(start, length)| *start == child_start && child_len <= *length)
+                .map(|(_, length)| length);
+            if let Some(allocated_len) =
+                allocated_len.filter(|_| child_len > 0 && p.energy >= cfg.commit_cost)
             {
                 p.energy -= cfg.commit_cost;
                 *ambient += cfg.commit_cost as u64;
@@ -255,7 +271,7 @@ pub fn step(
                 p.energy -= transfer;
                 let child_id = *next_id;
                 *next_id += 1;
-                let child = Program::new(
+                let mut child = Program::new(
                     child_id,
                     child_start,
                     child_len,
@@ -264,6 +280,15 @@ pub fn step(
                     Some(p.lineage_id),
                     p.template_id,
                 );
+                child.generation = p.generation.saturating_add(1);
+                child.tag = p.tag;
+                if child_len < allocated_len {
+                    fl.free(
+                        child_start.wrapping_add(child_len),
+                        allocated_len - child_len,
+                    );
+                }
+                p.pending_allocation = None;
                 p.ip = ip_next;
                 p.age += 1;
                 return StepResult::Spawned(Box::new(child));
@@ -274,9 +299,12 @@ pub fn step(
         Opcode::Split => {
             let child_start = p.reg_b;
             let child_len = p.reg_a;
-            if child_len > 0
-                && p.energy >= cfg.commit_cost
-                && !fl.is_free(child_start, child_len)
+            let allocated_len = p
+                .pending_allocation
+                .filter(|(start, length)| *start == child_start && child_len <= *length)
+                .map(|(_, length)| length);
+            if let Some(allocated_len) =
+                allocated_len.filter(|_| child_len > 0 && p.energy >= cfg.commit_cost)
             {
                 p.energy -= cfg.commit_cost;
                 *ambient += cfg.commit_cost as u64;
@@ -285,7 +313,7 @@ pub fn step(
                 p.energy -= child_energy;
                 let child_id = *next_id;
                 *next_id += 1;
-                let child = Program::new(
+                let mut child = Program::new(
                     child_id,
                     child_start,
                     child_len,
@@ -294,6 +322,15 @@ pub fn step(
                     Some(p.lineage_id),
                     p.template_id,
                 );
+                child.generation = p.generation.saturating_add(1);
+                child.tag = p.tag;
+                if child_len < allocated_len {
+                    fl.free(
+                        child_start.wrapping_add(child_len),
+                        allocated_len - child_len,
+                    );
+                }
+                p.pending_allocation = None;
                 p.ip = ip_next;
                 p.age += 1;
                 return StepResult::Spawned(Box::new(child));
@@ -307,14 +344,25 @@ pub fn step(
         // The base cost of 1 was already deducted, so p.energy is the remaining budget.
         Opcode::GiveEnergy => {
             let amount = (p.reg_b as u32).min(p.energy);
-            mem.give_energy(p.wh, amount);
+            mem.give_energy_from(p.wh, amount, Some(p.id));
             p.energy -= amount;
+            p.trace.given_a += amount as u64;
         }
 
         // TAKE_ENERGY: drain all energy from energy_map[rh] into own pool.
         Opcode::TakeEnergy => {
-            let gained = mem.take_energy(p.rh);
+            let (gained, donor) = mem.take_energy_with_donor(p.rh);
             p.energy = p.energy.saturating_add(gained);
+            p.trace.harvested_a += gained as u64;
+            if let Some(donor_id) = donor.filter(|donor_id| *donor_id != p.id) {
+                events.push(Event::ResourceTransfer {
+                    tick,
+                    donor_id,
+                    receiver_id: p.id,
+                    resource: ResourceKind::A,
+                    amount: gained,
+                });
+            }
         }
 
         // SENSE_ENERGY: read energy_map[rh] into reg_b (saturating at u16::MAX).
@@ -379,9 +427,93 @@ pub fn step(
             let hi = mem.read(ip.wrapping_add(2)) as u16;
             let target = lo | (hi << 8);
             let amount = (p.reg_b as u32).min(p.energy);
-            mem.give_energy(target, amount);
+            mem.give_energy_from(target, amount, Some(p.id));
             p.energy -= amount;
+            p.trace.given_a += amount as u64;
             ip_next = ip.wrapping_add(3);
+        }
+
+        Opcode::TakeResourceB => {
+            let (gained, donor) = mem.take_resource_b_with_donor(p.rh);
+            p.energy = p.energy.saturating_add(gained);
+            p.trace.harvested_b += gained as u64;
+            if let Some(donor_id) = donor.filter(|donor_id| *donor_id != p.id) {
+                events.push(Event::ResourceTransfer {
+                    tick,
+                    donor_id,
+                    receiver_id: p.id,
+                    resource: ResourceKind::B,
+                    amount: gained,
+                });
+            }
+        }
+
+        Opcode::SenseResourceB => {
+            p.reg_b = mem.sense_resource_b(p.rh).min(u16::MAX as u32) as u16;
+        }
+
+        Opcode::GiveResourceB => {
+            let amount = (p.reg_b as u32).min(p.energy);
+            mem.give_resource_b_from(p.wh, amount, Some(p.id));
+            p.energy -= amount;
+            p.trace.given_b += amount as u64;
+        }
+
+        Opcode::SeekResourceA => {
+            for distance in 0..=cfg.interaction_radius {
+                let forward = p.rh.wrapping_add(distance);
+                if mem.sense_energy(forward) > 0 {
+                    p.rh = forward;
+                    break;
+                }
+                let backward = p.rh.wrapping_sub(distance);
+                if mem.sense_energy(backward) > 0 {
+                    p.rh = backward;
+                    break;
+                }
+            }
+        }
+
+        Opcode::SeekResourceB => {
+            for distance in 0..=cfg.interaction_radius {
+                let forward = p.rh.wrapping_add(distance);
+                if mem.sense_resource_b(forward) > 0 {
+                    p.rh = forward;
+                    break;
+                }
+                let backward = p.rh.wrapping_sub(distance);
+                if mem.sense_resource_b(backward) > 0 {
+                    p.rh = backward;
+                    break;
+                }
+            }
+        }
+
+        Opcode::SetTag => {
+            let old_tag = p.tag;
+            p.tag = p.reg_a as u8;
+            if p.tag != old_tag {
+                events.push(Event::TagChanged {
+                    tick,
+                    id: p.id,
+                    old_tag,
+                    new_tag: p.tag,
+                });
+            }
+        }
+
+        Opcode::SeekTag => {
+            p.trace.tag_seeks += 1;
+            let target = p.reg_a as u8;
+            for distance in 0..=cfg.interaction_radius {
+                let addr = p.rh.wrapping_add(distance);
+                if let Some(owner) = addr_to_owner[addr as usize] {
+                    if owner != p.id && program_tags.get(owner as usize) == Some(&target) {
+                        p.reg_b = addr;
+                        break;
+                    }
+                }
+            }
         }
 
         // --- Halt ---
@@ -401,11 +533,12 @@ pub fn step(
 mod tests {
     use super::*;
     use crate::seed::SEED;
-    use rand::SeedableRng;
     use rand::rngs::StdRng;
+    use rand::SeedableRng;
 
     /// Empty ownership map used in tests that don't exercise foreign-ownership opcodes.
-    const NO_OWNERS: [Option<ProgramId>; 65536] = [None; 65536];
+    static NO_OWNERS: [Option<ProgramId>; 65536] = [None; 65536];
+    static NO_TAGS: [u8; 1] = [0];
 
     /// Build a minimal test environment: place `code` at address 0, free list starts
     /// immediately after, and create a Program whose start/length match the code slice.
@@ -417,7 +550,11 @@ mod tests {
         (p, mem, fl)
     }
 
-    fn make_program_with_length(code: &[u8], tracked_len: u16, energy: u32) -> (Program, Memory, FreeList) {
+    fn make_program_with_length(
+        code: &[u8],
+        tracked_len: u16,
+        energy: u32,
+    ) -> (Program, Memory, FreeList) {
         let mut mem = Memory::new();
         mem.place(0, code);
         let fl = FreeList::new(tracked_len, 0u16.wrapping_sub(tracked_len));
@@ -435,7 +572,19 @@ mod tests {
         let mut events = Vec::new();
         let mut ambient = 0u64;
         for _ in 0..1_000_000 {
-            last = step(&mut p, &mut mem, &mut fl, &NO_OWNERS, &cfg, &mut next_id, &mut rng, &mut events, 0, &mut ambient);
+            last = step(
+                &mut p,
+                &mut mem,
+                &mut fl,
+                &NO_OWNERS,
+                &NO_TAGS,
+                &cfg,
+                &mut next_id,
+                &mut rng,
+                &mut events,
+                0,
+                &mut ambient,
+            );
             match last {
                 StepResult::Continue => {}
                 _ => break,
@@ -453,7 +602,7 @@ mod tests {
         // NOP(0), HALT(255) — two instructions, 2 energy spent
         let (p, _, result) = run_to_end(&[0, 255], 10);
         assert!(matches!(result, StepResult::Halted));
-        assert_eq!(p.age, 2);    // NOP + HALT each increment age
+        assert_eq!(p.age, 2); // NOP + HALT each increment age
         assert_eq!(p.energy, 8); // 10 - 1 (NOP) - 1 (HALT) = 8
     }
 
@@ -502,7 +651,19 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(0);
         let mut events = Vec::new();
         let mut ambient = 0u64;
-        let _ = step(&mut p2, &mut mem2, &mut fl2, &NO_OWNERS, &cfg, &mut next_id, &mut rng, &mut events, 0, &mut ambient);
+        let _ = step(
+            &mut p2,
+            &mut mem2,
+            &mut fl2,
+            &NO_OWNERS,
+            &NO_TAGS,
+            &cfg,
+            &mut next_id,
+            &mut rng,
+            &mut events,
+            0,
+            &mut ambient,
+        );
         assert_eq!(p2.reg_a, 0);
     }
 
@@ -520,7 +681,7 @@ mod tests {
     fn copy_advances_rh_and_wh() {
         // COPY(10), HALT(255): copy mem[RH=0] to mem[WH=0], both heads advance to 1
         let mut code = vec![0u8; 20];
-        code[0] = 10;  // COPY
+        code[0] = 10; // COPY
         code[1] = 255; // HALT
         let (p, _, _) = run_to_end(&code, 10);
         assert_eq!(p.rh, 1);
@@ -561,7 +722,19 @@ mod tests {
         let mut ambient = 0u64;
         let mut result = StepResult::Continue;
         for _ in 0..10_000 {
-            result = step(&mut p, &mut mem, &mut fl, &NO_OWNERS, &cfg, &mut next_id, &mut rng, &mut events, 0, &mut ambient);
+            result = step(
+                &mut p,
+                &mut mem,
+                &mut fl,
+                &NO_OWNERS,
+                &NO_TAGS,
+                &cfg,
+                &mut next_id,
+                &mut rng,
+                &mut events,
+                0,
+                &mut ambient,
+            );
             match result {
                 StepResult::Continue => {}
                 _ => break,
@@ -571,8 +744,12 @@ mod tests {
         // In Phase 4, COMMIT spawns a child, so we expect Spawned.
         // We also accept Halted or Continue as fallbacks.
         assert!(
-            matches!(result, StepResult::Halted | StepResult::Continue | StepResult::Spawned(_)),
-            "Seed should halt, continue, or spawn a child, got: {:?}", result
+            matches!(
+                result,
+                StepResult::Halted | StepResult::Continue | StepResult::Spawned(_)
+            ),
+            "Seed should halt, continue, or spawn a child, got: {:?}",
+            result
         );
 
         // The allocated child block address is in reg_b.
@@ -599,7 +776,19 @@ mod tests {
         let mut events = Vec::new();
         let mut ambient = 0u64;
         for _ in 0..100 {
-            match step(&mut p, &mut mem, &mut fl, &NO_OWNERS, &cfg, &mut next_id, &mut rng, &mut events, 0, &mut ambient) {
+            match step(
+                &mut p,
+                &mut mem,
+                &mut fl,
+                &NO_OWNERS,
+                &NO_TAGS,
+                &cfg,
+                &mut next_id,
+                &mut rng,
+                &mut events,
+                0,
+                &mut ambient,
+            ) {
                 StepResult::Continue => {}
                 _ => break,
             }
@@ -626,7 +815,19 @@ mod tests {
         let mut events = Vec::new();
         let mut ambient = 0u64;
         for _ in 0..100 {
-            match step(&mut p, &mut mem, &mut fl, &NO_OWNERS, &cfg, &mut next_id, &mut rng, &mut events, 0, &mut ambient) {
+            match step(
+                &mut p,
+                &mut mem,
+                &mut fl,
+                &NO_OWNERS,
+                &NO_TAGS,
+                &cfg,
+                &mut next_id,
+                &mut rng,
+                &mut events,
+                0,
+                &mut ambient,
+            ) {
                 StepResult::Continue => {}
                 _ => break,
             }
@@ -648,7 +849,19 @@ mod tests {
         let mut events = Vec::new();
         let mut ambient = 0u64;
         for _ in 0..100 {
-            match step(&mut p, &mut mem, &mut fl, &NO_OWNERS, &cfg, &mut next_id, &mut rng, &mut events, 0, &mut ambient) {
+            match step(
+                &mut p,
+                &mut mem,
+                &mut fl,
+                &NO_OWNERS,
+                &NO_TAGS,
+                &cfg,
+                &mut next_id,
+                &mut rng,
+                &mut events,
+                0,
+                &mut ambient,
+            ) {
                 StepResult::Continue => {}
                 _ => break,
             }
@@ -656,6 +869,100 @@ mod tests {
         assert_eq!(p.reg_b, 1500);
         // Deposit unchanged by SENSE
         assert_eq!(mem.sense_energy(0), 1500);
+    }
+
+    #[test]
+    fn resource_b_requires_its_own_take_instruction() {
+        let code = [37u8, 255];
+        let (mut p, mut mem, mut fl) = make_program(&code, 100);
+        mem.give_resource_b(0, 200);
+        let cfg = Config::default();
+        let mut next_id = 100;
+        let mut rng = StdRng::seed_from_u64(0);
+        let mut events = Vec::new();
+        let mut ambient = 0;
+        let _ = step(
+            &mut p,
+            &mut mem,
+            &mut fl,
+            &NO_OWNERS,
+            &NO_TAGS,
+            &cfg,
+            &mut next_id,
+            &mut rng,
+            &mut events,
+            0,
+            &mut ambient,
+        );
+        assert_eq!(p.energy, 299);
+        assert_eq!(p.trace.harvested_b, 200);
+        assert_eq!(mem.sense_resource_b(0), 0);
+    }
+
+    #[test]
+    fn cross_organism_harvest_emits_transfer_provenance() {
+        let code = [37u8, 255];
+        let (mut p, mut mem, mut fl) = make_program(&code, 100);
+        mem.give_resource_b_from(0, 200, Some(2));
+        let cfg = Config::default();
+        let mut next_id = 100;
+        let mut rng = StdRng::seed_from_u64(0);
+        let mut events = Vec::new();
+        let mut ambient = 0;
+        let _ = step(
+            &mut p,
+            &mut mem,
+            &mut fl,
+            &NO_OWNERS,
+            &NO_TAGS,
+            &cfg,
+            &mut next_id,
+            &mut rng,
+            &mut events,
+            9,
+            &mut ambient,
+        );
+
+        assert!(events.iter().any(|event| matches!(
+            event,
+            Event::ResourceTransfer {
+                tick: 9,
+                donor_id: 2,
+                receiver_id: 1,
+                resource: ResourceKind::B,
+                amount: 200,
+            }
+        )));
+    }
+
+    #[test]
+    fn seek_tag_finds_matching_partner() {
+        let code = [43u8, 255];
+        let (mut p, mut mem, mut fl) = make_program(&code, 100);
+        p.reg_a = 7;
+        let mut owners = vec![None; 65536];
+        owners[123] = Some(2);
+        let tags = [0, 0, 7];
+        let cfg = Config::default();
+        let mut next_id = 100;
+        let mut rng = StdRng::seed_from_u64(0);
+        let mut events = Vec::new();
+        let mut ambient = 0;
+        let _ = step(
+            &mut p,
+            &mut mem,
+            &mut fl,
+            &owners,
+            &tags,
+            &cfg,
+            &mut next_id,
+            &mut rng,
+            &mut events,
+            0,
+            &mut ambient,
+        );
+        assert_eq!(p.reg_b, 123);
+        assert_eq!(p.trace.tag_seeks, 1);
     }
 
     #[test]
@@ -683,8 +990,21 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(0);
         let mut events = Vec::new();
         let mut ambient = 0u64;
+        #[allow(clippy::while_let_loop)]
         loop {
-            match step(&mut p, &mut mem, &mut fl, &NO_OWNERS, &cfg, &mut next_id, &mut rng, &mut events, 0, &mut ambient) {
+            match step(
+                &mut p,
+                &mut mem,
+                &mut fl,
+                &NO_OWNERS,
+                &NO_TAGS,
+                &cfg,
+                &mut next_id,
+                &mut rng,
+                &mut events,
+                0,
+                &mut ambient,
+            ) {
                 StepResult::Continue => {}
                 _ => break,
             }
@@ -715,7 +1035,19 @@ mod tests {
 
         let mut result = StepResult::Continue;
         for _ in 0..1_000 {
-            result = step(&mut p, &mut mem, &mut fl, &NO_OWNERS, &cfg, &mut next_id, &mut rng, &mut events, 0, &mut ambient);
+            result = step(
+                &mut p,
+                &mut mem,
+                &mut fl,
+                &NO_OWNERS,
+                &NO_TAGS,
+                &cfg,
+                &mut next_id,
+                &mut rng,
+                &mut events,
+                0,
+                &mut ambient,
+            );
             if !matches!(result, StepResult::Continue) {
                 break;
             }

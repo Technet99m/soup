@@ -1,19 +1,28 @@
+use crate::program::ProgramId;
 use rand::Rng;
 
 /// The shared flat memory array. All address arithmetic uses u16 so wrapping
 /// over the 64 KiB boundary is automatic and free.
+#[derive(Clone)]
 pub struct Memory {
     cells: [u8; 65536],
     /// Per-cell energy deposits. Programs can store energy here via GIVE_ENERGY
     /// and drain it via TAKE_ENERGY. Independent of the byte instruction value.
     pub energy_map: Box<[u32; 65536]>,
+    /// A chemically distinct resource. It has its own seek/sense/take/give opcodes.
+    pub resource_b_map: Box<[u32; 65536]>,
+    pub resource_a_donor: Box<[Option<ProgramId>; 65536]>,
+    pub resource_b_donor: Box<[Option<ProgramId>; 65536]>,
 }
 
 impl Memory {
     pub fn new() -> Self {
         Self {
             cells: [0u8; 65536],
-            energy_map: Box::new([0u32; 65536]),
+            energy_map: boxed_array(0u32),
+            resource_b_map: boxed_array(0u32),
+            resource_a_donor: boxed_array(None),
+            resource_b_donor: boxed_array(None),
         }
     }
 
@@ -87,15 +96,33 @@ impl Memory {
     /// Deposit `amount` energy at `addr`, accumulating any existing deposit.
     #[inline]
     pub fn give_energy(&mut self, addr: u16, amount: u32) {
-        self.energy_map[addr as usize] = self.energy_map[addr as usize].saturating_add(amount);
+        self.give_energy_from(addr, amount, None);
+    }
+
+    pub fn give_energy_from(&mut self, addr: u16, amount: u32, donor: Option<ProgramId>) {
+        let index = addr as usize;
+        let was_empty = self.energy_map[index] == 0;
+        self.energy_map[index] = self.energy_map[index].saturating_add(amount);
+        self.resource_a_donor[index] = if was_empty {
+            donor
+        } else {
+            merge_donor(self.resource_a_donor[index], donor)
+        };
     }
 
     /// Drain all deposited energy at `addr`, returning the amount taken.
     #[inline]
     pub fn take_energy(&mut self, addr: u16) -> u32 {
-        let amount = self.energy_map[addr as usize];
-        self.energy_map[addr as usize] = 0;
-        amount
+        self.take_energy_with_donor(addr).0
+    }
+
+    pub fn take_energy_with_donor(&mut self, addr: u16) -> (u32, Option<ProgramId>) {
+        let index = addr as usize;
+        let amount = self.energy_map[index];
+        let donor = self.resource_a_donor[index];
+        self.energy_map[index] = 0;
+        self.resource_a_donor[index] = None;
+        (amount, donor)
     }
 
     /// Read deposited energy at `addr` without consuming it.
@@ -104,9 +131,58 @@ impl Memory {
         self.energy_map[addr as usize]
     }
 
+    #[inline]
+    pub fn give_resource_b(&mut self, addr: u16, amount: u32) {
+        self.give_resource_b_from(addr, amount, None);
+    }
+
+    pub fn give_resource_b_from(&mut self, addr: u16, amount: u32, donor: Option<ProgramId>) {
+        let index = addr as usize;
+        let was_empty = self.resource_b_map[index] == 0;
+        self.resource_b_map[index] = self.resource_b_map[index].saturating_add(amount);
+        self.resource_b_donor[index] = if was_empty {
+            donor
+        } else {
+            merge_donor(self.resource_b_donor[index], donor)
+        };
+    }
+
+    #[inline]
+    pub fn take_resource_b(&mut self, addr: u16) -> u32 {
+        self.take_resource_b_with_donor(addr).0
+    }
+
+    pub fn take_resource_b_with_donor(&mut self, addr: u16) -> (u32, Option<ProgramId>) {
+        let index = addr as usize;
+        let amount = self.resource_b_map[index];
+        let donor = self.resource_b_donor[index];
+        self.resource_b_map[index] = 0;
+        self.resource_b_donor[index] = None;
+        (amount, donor)
+    }
+
+    #[inline]
+    pub fn sense_resource_b(&self, addr: u16) -> u32 {
+        self.resource_b_map[addr as usize]
+    }
+
     /// Expose the raw cells for visualization / stats.
     pub fn as_bytes(&self) -> &[u8; 65536] {
         &self.cells
+    }
+}
+
+fn boxed_array<T: Clone>(value: T) -> Box<[T; 65536]> {
+    match vec![value; 65536].into_boxed_slice().try_into() {
+        Ok(array) => array,
+        Err(_) => unreachable!("fixed-length allocation has the requested size"),
+    }
+}
+
+fn merge_donor(existing: Option<ProgramId>, incoming: Option<ProgramId>) -> Option<ProgramId> {
+    match (existing, incoming) {
+        (Some(left), Some(right)) if left == right => Some(left),
+        _ => None,
     }
 }
 
@@ -152,6 +228,16 @@ mod tests {
     }
 
     #[test]
+    fn resource_b_is_independent_and_consumable() {
+        let mut memory = Memory::new();
+        memory.give_energy(10, 40);
+        memory.give_resource_b(10, 70);
+        assert_eq!(memory.take_resource_b(10), 70);
+        assert_eq!(memory.sense_resource_b(10), 0);
+        assert_eq!(memory.sense_energy(10), 40);
+    }
+
+    #[test]
     fn give_energy_saturates() {
         let mut m = Memory::new();
         m.give_energy(0, u32::MAX);
@@ -164,7 +250,7 @@ mod tests {
         let mut m = Memory::new();
         m.write(5, 42);
         m.give_energy(5, 100);
-        assert_eq!(m.read(5), 42);     // instruction unchanged
+        assert_eq!(m.read(5), 42); // instruction unchanged
         assert_eq!(m.sense_energy(5), 100);
     }
 
@@ -174,7 +260,7 @@ mod tests {
         m.place(65534, &[10, 20, 30, 40]);
         assert_eq!(m.read(65534), 10);
         assert_eq!(m.read(65535), 20);
-        assert_eq!(m.read(0),     30);
-        assert_eq!(m.read(1),     40);
+        assert_eq!(m.read(0), 30);
+        assert_eq!(m.read(1), 40);
     }
 }

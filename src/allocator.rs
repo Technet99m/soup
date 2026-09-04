@@ -1,15 +1,16 @@
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FreeBlock {
     pub start: u16,
-    pub length: u16,
+    pub length: u32,
 }
 
 impl FreeBlock {
     fn end(&self) -> u32 {
-        self.start as u32 + self.length as u32
+        self.start as u32 + self.length
     }
 }
 
+#[derive(Clone)]
 pub struct FreeList {
     /// Always sorted by `start`, non-overlapping, coalesced.
     blocks: Vec<FreeBlock>,
@@ -19,7 +20,10 @@ impl FreeList {
     pub fn new(start: u16, length: u16) -> Self {
         Self {
             blocks: if length > 0 {
-                vec![FreeBlock { start, length }]
+                vec![FreeBlock {
+                    start,
+                    length: length as u32,
+                }]
             } else {
                 vec![]
             },
@@ -35,12 +39,12 @@ impl FreeList {
             .blocks
             .iter()
             .enumerate()
-            .filter(|(_, b)| b.length >= size)
+            .filter(|(_, b)| b.length >= size as u32)
             .min_by_key(|(_, b)| b.length)
             .map(|(i, _)| i)?;
 
         let start = self.blocks[best_idx].start;
-        let remaining = self.blocks[best_idx].length - size;
+        let remaining = self.blocks[best_idx].length - size as u32;
         if remaining == 0 {
             self.blocks.remove(best_idx);
         } else {
@@ -50,12 +54,61 @@ impl FreeList {
         Some(start)
     }
 
+    /// Allocate the fitting location with the smallest circular distance to `near`.
+    /// Unlike `nearest_free`, this can carve from the middle of a free block.
+    pub fn alloc_near(&mut self, near: u16, size: u16) -> Option<u16> {
+        if size == 0 {
+            return None;
+        }
+        let size32 = size as u32;
+        let (index, start) = self
+            .blocks
+            .iter()
+            .enumerate()
+            .filter(|(_, block)| block.length >= size32)
+            .map(|(index, block)| {
+                let first = block.start as u32;
+                let last = block.end() - size32;
+                let linear = (near as u32).clamp(first, last) as u16;
+                let candidates = [linear, block.start, last as u16];
+                let start = candidates
+                    .into_iter()
+                    .min_by_key(|candidate| circular_distance(*candidate, near))
+                    .unwrap();
+                (index, start)
+            })
+            .min_by_key(|(_, start)| circular_distance(*start, near))?;
+
+        let block = self.blocks.remove(index);
+        let before = start as u32 - block.start as u32;
+        let after_start = start as u32 + size32;
+        let after = block.end() - after_start;
+        if before > 0 {
+            self.blocks.push(FreeBlock {
+                start: block.start,
+                length: before,
+            });
+        }
+        if after > 0 {
+            self.blocks.push(FreeBlock {
+                start: after_start as u16,
+                length: after,
+            });
+        }
+        self.blocks
+            .sort_unstable_by_key(|candidate| candidate.start);
+        Some(start)
+    }
+
     /// Return a region to the free list and coalesce adjacent blocks.
     pub fn free(&mut self, start: u16, length: u16) {
         if length == 0 {
             return;
         }
-        self.blocks.push(FreeBlock { start, length });
+        self.blocks.push(FreeBlock {
+            start,
+            length: length as u32,
+        });
         self.coalesce();
     }
 
@@ -70,8 +123,7 @@ impl FreeList {
             let cur_start = self.blocks[read].start as u32;
             if prev_end >= cur_start {
                 let merged_end = prev_end.max(self.blocks[read].end());
-                self.blocks[write].length =
-                    (merged_end - self.blocks[write].start as u32) as u16;
+                self.blocks[write].length = merged_end - self.blocks[write].start as u32;
             } else {
                 write += 1;
                 self.blocks[write] = self.blocks[read].clone();
@@ -93,7 +145,7 @@ impl FreeList {
     pub fn nearest_free(&self, near: u16, min_size: u16) -> Option<u16> {
         self.blocks
             .iter()
-            .filter(|b| b.length >= min_size)
+            .filter(|b| b.length >= min_size as u32)
             .min_by_key(|b| {
                 let d = b.start.wrapping_sub(near);
                 d.min(near.wrapping_sub(b.start))
@@ -106,12 +158,16 @@ impl FreeList {
     }
 
     pub fn free_bytes(&self) -> u32 {
-        self.blocks.iter().map(|b| b.length as u32).sum()
+        self.blocks.iter().map(|b| b.length).sum()
     }
 
     pub fn num_blocks(&self) -> usize {
         self.blocks.len()
     }
+}
+
+fn circular_distance(a: u16, b: u16) -> u16 {
+    a.wrapping_sub(b).min(b.wrapping_sub(a))
 }
 
 #[cfg(test)]
@@ -130,8 +186,14 @@ mod tests {
     fn alloc_best_fit() {
         let mut fl = FreeList::new(0, 0);
         fl.blocks = vec![
-            FreeBlock { start: 0,   length: 50 },
-            FreeBlock { start: 100, length: 200 },
+            FreeBlock {
+                start: 0,
+                length: 50,
+            },
+            FreeBlock {
+                start: 100,
+                length: 200,
+            },
         ];
         let a = fl.alloc(40).unwrap();
         assert_eq!(a, 0);
@@ -154,6 +216,15 @@ mod tests {
 
         assert_eq!(fl.num_blocks(), 1);
         assert_eq!(fl.free_bytes(), 1000);
+    }
+
+    #[test]
+    fn coalesced_list_can_represent_the_entire_address_space() {
+        let mut fl = FreeList::new(0, u16::MAX);
+        fl.free(u16::MAX, 1);
+
+        assert_eq!(fl.num_blocks(), 1);
+        assert_eq!(fl.free_bytes(), 65_536);
     }
 
     #[test]
@@ -180,12 +251,27 @@ mod tests {
     fn nearest_free() {
         let mut fl = FreeList::new(0, 0);
         fl.blocks = vec![
-            FreeBlock { start: 100, length: 50 },
-            FreeBlock { start: 500, length: 50 },
+            FreeBlock {
+                start: 100,
+                length: 50,
+            },
+            FreeBlock {
+                start: 500,
+                length: 50,
+            },
         ];
         // nearest to 120 with size 10 should be block at 100
         assert_eq!(fl.nearest_free(120, 10), Some(100));
         // nearest to 490 with size 10 should be block at 500
         assert_eq!(fl.nearest_free(490, 10), Some(500));
+    }
+
+    #[test]
+    fn alloc_near_carves_next_to_parent() {
+        let mut fl = FreeList::new(100, 500);
+        assert_eq!(fl.alloc_near(350, 20), Some(350));
+        assert!(!fl.is_free(350, 20));
+        assert_eq!(fl.free_bytes(), 480);
+        assert_eq!(fl.num_blocks(), 2);
     }
 }

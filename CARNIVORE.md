@@ -19,18 +19,20 @@ Carnivore programs write crafted bytecodes directly into another live program's 
 ### Observability Events
 
 - `ForeignExec { tick, id, ip, owner_id }` — emitted each tick a program is about to execute an instruction at an address owned by a different program. Controlled by `foreign_exec_tracking` config (default: true).
-- `ForeignWrite { tick, attacker_id, victim_id, address }` — emitted when `WRITE` or `COPY` targets a foreign-owned cell. Controlled by `foreign_write_tracking` config (default: false, can be noisy).
+- `ForeignWrite { tick, attacker_id, victim_id, address }` — emitted when `WRITE` or `COPY` targets a foreign-owned cell. Controlled by `foreign_write_tracking` config (default: true so the observer can show attacks).
 
 ### Config Knobs
 
 | Key | Env Var | Default |
 |-----|---------|---------|
 | `foreign_exec_tracking` | `FOREIGN_EXEC_TRACKING` | true |
-| `foreign_write_tracking` | `FOREIGN_WRITE_TRACKING` | false |
+| `foreign_write_tracking` | `FOREIGN_WRITE_TRACKING` | true |
 
 ---
 
 ## Starter Templates
+
+Both templates ship with `seed = false`. Set it to `true` in the template file to inoculate a world with that predator.
 
 ### `06_carnivore_killer` (8 bytes)
 

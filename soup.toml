@@ -4,10 +4,14 @@
 # --- Energy deployment ---
 ambient_drip_interval = 10    # ticks between drip events (lower = more frequent)
 ambient_drip_amount   = 500   # energy added to a random cell per drip
+energy_rain_width     = 8     # concentrated cells; one local harvest can fund a copy cycle
+energy_rain_life_bias = 0.95  # fraction of fronts centered near existing life
+energy_rain_radius    = 96    # max address distance from the chosen organism
 
 # --- Energy decay ---
 energy_decay_rate     = 1     # energy subtracted per decay sweep
 energy_decay_interval = 100   # ticks between decay sweeps
+energy_current        = 17    # cells energy drifts forward per decay sweep
 
 # --- Energy budget ---
 total_energy          = 1_000_000  # total energy conserved in the system
@@ -16,10 +20,19 @@ child_energy          = 500        # energy transferred to child on COMMIT
 
 # --- Costs ---
 alloc_cost            = 10    # energy cost to allocate memory
-commit_cost           = 20    # energy cost to commit (reproduce)
+commit_cost           = 20     # energy cost to commit (reproduce)
+max_program_age       = 20_000 # executed instructions before an organism wears out
 
 # --- Simulation ---
 mutation_rate         = 0.005
+insertion_rate        = 0.004 # per birth; inserts one random instruction
+deletion_rate         = 0.004 # per birth; deletes a short instruction span
+duplication_rate      = 0.004 # per birth; copies a short instruction span
+max_genome_length     = 512
+child_locality_bias   = 0.92  # most children are allocated beside their parent
+tag_mutation_rate     = 0.01  # heritable partner-recognition marker
+interaction_radius    = 256   # resource and partner searches remain spatially local
+foreign_write_tracking = true # expose predation in the evolution observer
 loop_max_depth        = 8
 ticks_per_stat_log    = 10_000
 rng_seed              = 14201

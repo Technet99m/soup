@@ -1,4 +1,5 @@
 name = "splitter"
+seed = false
 description = "Forward adaptive scanner with SPLIT: scans own-length cells forward, then splits energy equally with child. Uses MEASURE_SELF throughout — fully adaptive to size mutations. No GIVE_ENERGY needed since SPLIT transfers energy directly."
 # 20 bytes:
 # [0]  SEEK_SELF_START   [1]  TAKE_ENERGY         (parent gift)

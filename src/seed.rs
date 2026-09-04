@@ -1,54 +1,26 @@
-/// The primordial ancestor — a bloated, inefficient self-replicator. 32 bytes.
-/// Intentionally wasteful so evolution has clear room to improve.
+/// The single primordial ancestor. It is deliberately small and uses measured
+/// length, so insertions, deletions, and duplications can remain heritable.
 ///
-/// Energy mechanics:
-///   [1]  TAKE_ENERGY — absorb any deposit left by parent at self.start (RH=start after [0])
-///   After COMMIT, deposits 100 energy at the child's start address so the child
-///   can absorb it on its first TAKE_ENERGY call.
-///
-/// Improvable regions (mutations that make descendants more competitive):
-///   [4]        NOP_40          — wasted execute + copy cycle
-///   [8],[9]    SEEK_SELF_START — both redundant before copy loop
-///   [12]       NOP_50          — wasted cycle inside approach to loop
-///   [18],[19]  NOP_60, NOP_70  — wasted cycles after loop
-///   [26]..[28] NOP variants    — 3 bytes of remaining padding
-///   Energy amount at [23] (100) — evolution can tune this up or down
-///
-/// JMP_BWD at [31], A=32: ip_next = (31+1) - 32 = 0 → loops back to start ✓
-/// LOOP_CLOSE "decrement then check": A=32 → COPY executes exactly 32 times ✓
-pub const SEED: [u8; 32] = [
-    5,    // [0]  SEEK_SELF_START   — RH = start (necessary)
-    31,   // [1]  TAKE_ENERGY       — absorb any deposit at RH=start from parent
-    12,   // [2]  LOAD_IMM
-    32,   // [3]    A = 32          — own length (for ALLOC)
-    40,   // [4]  NOP               — wasted cycle
-    25,   // [5]  ALLOC             — B = child block start
-    11,   // [6]  SET_WRITE_HEAD    — WH = B
-    5,    // [7]  SEEK_SELF_START   — RH = start (necessary: reset for copy)
-    5,    // [8]  SEEK_SELF_START   — REDUNDANT
-    5,    // [9]  SEEK_SELF_START   — REDUNDANT
-    12,   // [10] LOAD_IMM
-    32,   // [11]   A = 32          — loop counter
-    50,   // [12] NOP               — wasted cycle
-    23,   // [13] LOOP_OPEN
-    10,   // [14] COPY              — copy RH→WH, advance both
-    24,   // [15] LOOP_CLOSE        — decrement A; if A!=0 jump back to [13]
-    12,   // [16] LOAD_IMM
-    32,   // [17]   A = 32          — size for COMMIT
-    60,   // [18] NOP               — wasted cycle
-    70,   // [19] NOP               — wasted cycle
-    26,   // [20] COMMIT            — register child at B with size A
-    11,   // [21] SET_WRITE_HEAD    — WH = B (child_start; reg_b unchanged after COMMIT)
-    12,   // [22] LOAD_IMM
-    100,  // [23]   A = 100         — energy gift for child
-    17,   // [24] SWAP              — reg_b = 100, reg_a = old reg_b
-    30,   // [25] GIVE_ENERGY       — deposit reg_b=100 at WH=child_start
-    80,   // [26] NOP               — padding
-    90,   // [27] NOP               — padding
-    110,  // [28] NOP               — padding
-    12,   // [29] LOAD_IMM
-    32,   // [30]   A = 32          — JMP_BWD distance
-    20,   // [31] JMP_BWD           — ip_next = (31+1) - 32 = 0 ✓
+/// It seeks and harvests both resource chemistries, copies its current genome,
+/// splits its energy with the child, then loops. Descendants may lose or alter
+/// either metabolic path and can acquire tag-based interaction instructions.
+pub const SEED: [u8; 16] = [
+    40, // [0]  SEEK_RESOURCE_A
+    31, // [1]  TAKE_ENERGY (resource A)
+    41, // [2]  SEEK_RESOURCE_B
+    37, // [3]  TAKE_RESOURCE_B
+    33, // [4]  MEASURE_SELF
+    25, // [5]  ALLOC measured length
+    11, // [6]  SET_WRITE_HEAD to child block
+    5,  // [7]  SEEK_SELF_START
+    33, // [8]  MEASURE_SELF for copy count
+    23, // [9]  LOOP_OPEN
+    10, // [10] COPY
+    24, // [11] LOOP_CLOSE
+    33, // [12] MEASURE_SELF for child length
+    27, // [13] SPLIT energy and commit child
+    33, // [14] MEASURE_SELF for jump distance
+    20, // [15] JMP_BWD to [0]
 ];
 
 pub const SEED_LEN: u16 = SEED.len() as u16;
@@ -58,58 +30,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn seed_length_matches_encoded_immediates() {
-        assert_eq!(SEED.len(), 32);
-        // All four LOAD_IMM immediates must equal own length
-        assert_eq!(SEED[3],  32, "ALLOC size immediate");
-        assert_eq!(SEED[11], 32, "loop counter immediate");
-        assert_eq!(SEED[17], 32, "COMMIT size immediate");
-        assert_eq!(SEED[30], 32, "JMP_BWD distance immediate");
+    fn seed_is_length_adaptive_and_loops() {
+        assert_eq!(SEED.len(), 16);
+        assert_eq!(SEED[4], 33, "allocation length is measured");
+        assert_eq!(SEED[8], 33, "copy count is measured");
+        assert_eq!(SEED[12], 33, "child length is measured");
+        assert_eq!(SEED[14], 33, "loop distance is measured");
+        assert_eq!((15u16 + 1).wrapping_sub(SEED_LEN), 0);
     }
 
     #[test]
-    fn seed_opcodes_at_expected_positions() {
-        assert_eq!(SEED[0],  5,  "SEEK_SELF_START");
-        assert_eq!(SEED[1],  31, "TAKE_ENERGY");
-        assert_eq!(SEED[2],  12, "LOAD_IMM");
-        assert_eq!(SEED[5],  25, "ALLOC");
-        assert_eq!(SEED[6],  11, "SET_WRITE_HEAD");
-        assert_eq!(SEED[7],  5,  "SEEK_SELF_START");
-        assert_eq!(SEED[8],  5,  "SEEK_SELF_START (redundant)");
-        assert_eq!(SEED[9],  5,  "SEEK_SELF_START (redundant)");
-        assert_eq!(SEED[10], 12, "LOAD_IMM");
-        assert_eq!(SEED[13], 23, "LOOP_OPEN");
-        assert_eq!(SEED[14], 10, "COPY");
-        assert_eq!(SEED[15], 24, "LOOP_CLOSE");
-        assert_eq!(SEED[16], 12, "LOAD_IMM");
-        assert_eq!(SEED[20], 26, "COMMIT");
-        assert_eq!(SEED[21], 11, "SET_WRITE_HEAD (reset WH to child_start for energy gift)");
-        assert_eq!(SEED[22], 12, "LOAD_IMM");
-        assert_eq!(SEED[23], 100, "energy gift amount");
-        assert_eq!(SEED[24], 17, "SWAP (put amount into reg_b)");
-        assert_eq!(SEED[25], 30, "GIVE_ENERGY");
-        assert_eq!(SEED[29], 12, "LOAD_IMM");
-        assert_eq!(SEED[31], 20, "JMP_BWD");
-    }
-
-    #[test]
-    fn nop_variants_are_all_nops() {
-        // Positions 26-28 are the remaining NOP padding (opcodes 33-254 are NOP variants)
-        for pos in 26..=28 {
-            assert!(
-                SEED[pos] >= 33 && SEED[pos] <= 254,
-                "position {pos} should be a NOP variant, got {}",
-                SEED[pos]
-            );
-        }
-    }
-
-    #[test]
-    fn jmp_bwd_returns_to_start() {
-        // JMP_BWD at [31], A = SEED[30] = 32 → ip_next = (31+1) - 32 = 0
-        let jmpbwd_pos: u16 = 31;
-        let a: u16 = SEED[30] as u16;
-        let ip_next = (jmpbwd_pos + 1).wrapping_sub(a);
-        assert_eq!(ip_next, 0, "JMP_BWD should jump back to address 0");
+    fn seed_can_process_both_resources() {
+        assert_eq!(&SEED[..4], &[40, 31, 41, 37]);
     }
 }
