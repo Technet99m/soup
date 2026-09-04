@@ -51,7 +51,7 @@ fn main() {
 
     println!(
         "{:>12}  {:>5}  {:>7}  {:>4}  {:>5}  {:>7}  {:>9}  {:>6}",
-        "tick", "live", "genomes", "gen", "drift", "births", "mutations", "mem%"
+        "tick", "live", "ecotypes", "gen", "drift", "births", "mutations", "mem%"
     );
 
     loop {
@@ -85,12 +85,14 @@ fn main() {
     if test_symbiosis {
         match world.counterfactual_symbiosis(symbiosis_horizon) {
             Some(report) => println!(
-                "Counterfactual {:?}: {:06x} dependence={:.1}% ({} intact births), {:06x} dependence={:.1}% ({} intact births), horizon={}",
+                "Counterfactual {:?}: {:06x}/tag={:02x} dependence={:.1}% ({} intact births), {:06x}/tag={:02x} dependence={:.1}% ({} intact births), horizon={}",
                 report.verdict,
-                report.genome_a & 0xffffff,
+                report.ecotype_a.genome & 0xffffff,
+                report.ecotype_a.tag,
                 report.dependence_a * 100.0,
                 report.baseline_births_a,
-                report.genome_b & 0xffffff,
+                report.ecotype_b.genome & 0xffffff,
+                report.ecotype_b.tag,
                 report.dependence_b * 100.0,
                 report.baseline_births_b,
                 report.horizon,

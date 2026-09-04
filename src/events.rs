@@ -1,4 +1,4 @@
-use crate::program::ProgramId;
+use crate::{identity::Ecotype, program::ProgramId};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -22,6 +22,8 @@ pub enum Event {
         length: u16,
         energy: u32,
         generation: u32,
+        /// The child's byte genome plus recognition tag at birth.
+        ecotype: Ecotype,
     },
     Died {
         tick: u64,

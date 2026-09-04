@@ -2,6 +2,7 @@ use crate::{
     allocator::FreeList,
     config::Config,
     events::{DeathCause, Event, ResourceKind, StructuralMutationKind},
+    identity::Ecotype,
     memory::Memory,
     program::{Program, ProgramId},
     template,
@@ -12,8 +13,8 @@ use std::collections::{HashMap, VecDeque};
 
 #[derive(Debug, Clone)]
 pub struct SymbiosisReport {
-    pub genome_a: u64,
-    pub genome_b: u64,
+    pub ecotype_a: Ecotype,
+    pub ecotype_b: Ecotype,
     pub horizon: u64,
     pub baseline_births_a: u64,
     pub baseline_births_b: u64,
@@ -64,16 +65,16 @@ pub struct World {
     pub addr_to_owner: Box<[Option<ProgramId>]>,
     /// Current tag by program ID. Dead IDs remain as harmless historical entries.
     pub program_tags: Vec<u8>,
-    /// Successful reproduction attributed to the parent's current genome.
-    pub births_by_parent_genome: HashMap<u64, u64>,
-    /// Tick of the latest successful reproduction by each genome.
-    pub last_birth_by_genome: HashMap<u64, u64>,
-    /// Most recently observed genome for every program ID, retained after death.
-    pub genome_by_id: Vec<u64>,
-    /// Cross-genome resources consumed, keyed by (donor genome, receiver genome).
-    pub interactions: HashMap<(u64, u64), u64>,
-    /// Executed instructions attributed to the genome present before each step.
-    pub steps_by_genome: HashMap<u64, u64>,
+    /// Successful reproduction attributed to the parent's byte-and-tag ecotype.
+    pub births_by_parent_ecotype: HashMap<Ecotype, u64>,
+    /// Tick of the latest successful reproduction by each ecotype.
+    pub last_birth_by_ecotype: HashMap<Ecotype, u64>,
+    /// Most recently observed ecotype for every program ID, retained after death.
+    pub ecotype_by_id: Vec<Ecotype>,
+    /// Cross-ecotype resources consumed, keyed by (donor, receiver).
+    pub interactions: HashMap<(Ecotype, Ecotype), u64>,
+    /// Executed instructions attributed to the ecotype present before each step.
+    pub steps_by_ecotype: HashMap<Ecotype, u64>,
     pub total_births: u64,
     pub total_deaths: u64,
     pub total_mutations: u64,
@@ -206,9 +207,10 @@ impl World {
             }
             program_tags[prog.id as usize] = prog.tag;
         }
-        let mut genome_by_id = vec![0; num];
+        let mut ecotype_by_id = vec![Ecotype::new(0, 0); num];
         for program in programs.values() {
-            genome_by_id[program.id as usize] = genome_hash_in_memory(&memory, program);
+            ecotype_by_id[program.id as usize] =
+                Ecotype::new(genome_hash_in_memory(&memory, program), program.tag);
         }
 
         World {
@@ -225,11 +227,11 @@ impl World {
             ambient_pool,
             addr_to_owner,
             program_tags,
-            births_by_parent_genome: HashMap::new(),
-            last_birth_by_genome: HashMap::new(),
-            genome_by_id,
+            births_by_parent_ecotype: HashMap::new(),
+            last_birth_by_ecotype: HashMap::new(),
+            ecotype_by_id,
             interactions: HashMap::new(),
-            steps_by_genome: HashMap::new(),
+            steps_by_ecotype: HashMap::new(),
             total_births: 0,
             total_deaths: 0,
             total_mutations: 0,
@@ -302,15 +304,15 @@ impl World {
             }
         }
 
-        let executing_hash = self
+        let executing_ecotype = self
             .programs
             .get(&id)
-            .map(|program| self.genome_hash(program))
-            .unwrap_or(0);
-        if let Some(genome) = self.genome_by_id.get_mut(id as usize) {
-            *genome = executing_hash;
+            .map(|program| self.ecotype(program))
+            .unwrap_or(Ecotype::new(0, 0));
+        if let Some(ecotype) = self.ecotype_by_id.get_mut(id as usize) {
+            *ecotype = executing_ecotype;
         }
-        *self.steps_by_genome.entry(executing_hash).or_default() += 1;
+        *self.steps_by_ecotype.entry(executing_ecotype).or_default() += 1;
         let result = {
             let p = self.programs.get_mut(&id).unwrap();
             vm::step(
@@ -330,6 +332,11 @@ impl World {
         if let Some(program) = self.programs.get(&id) {
             if let Some(tag) = self.program_tags.get_mut(id as usize) {
                 *tag = program.tag;
+            }
+            let current_ecotype =
+                Ecotype::new(genome_hash_in_memory(&self.memory, program), program.tag);
+            if let Some(ecotype) = self.ecotype_by_id.get_mut(id as usize) {
+                *ecotype = current_ecotype;
             }
         }
 
@@ -397,15 +404,19 @@ impl World {
                 }
             }
             StepResult::Spawned(mut child) => {
-                let parent_hash = self
+                let parent_ecotype = self
                     .programs
                     .get(&id)
-                    .map(|parent| self.genome_hash(parent))
-                    .unwrap_or(0);
-                *self.births_by_parent_genome.entry(parent_hash).or_default() += 1;
-                self.last_birth_by_genome.insert(parent_hash, self.tick);
+                    .map(|parent| self.ecotype(parent))
+                    .unwrap_or(Ecotype::new(0, 0));
+                *self
+                    .births_by_parent_ecotype
+                    .entry(parent_ecotype)
+                    .or_default() += 1;
+                self.last_birth_by_ecotype.insert(parent_ecotype, self.tick);
                 let parent_start = self.programs[&id].start;
                 self.apply_birth_mutations(&mut child, parent_start, &mut events);
+                let child_ecotype = self.ecotype(&child);
                 events.push(Event::Born {
                     tick: self.tick,
                     id: child.id,
@@ -416,6 +427,7 @@ impl World {
                     length: child.length,
                     energy: child.energy,
                     generation: child.generation,
+                    ecotype: child_ecotype,
                 });
                 events.push(Event::Committed {
                     tick: self.tick,
@@ -427,10 +439,11 @@ impl World {
                     self.program_tags.resize(child_id as usize + 1, 0);
                 }
                 self.program_tags[child_id as usize] = child.tag;
-                if self.genome_by_id.len() <= child_id as usize {
-                    self.genome_by_id.resize(child_id as usize + 1, 0);
+                if self.ecotype_by_id.len() <= child_id as usize {
+                    self.ecotype_by_id
+                        .resize(child_id as usize + 1, Ecotype::new(0, 0));
                 }
-                self.genome_by_id[child_id as usize] = self.genome_hash(&child);
+                self.ecotype_by_id[child_id as usize] = child_ecotype;
                 for offset in 0..child.length as usize {
                     self.addr_to_owner[(child.start as usize + offset) % 65536] = Some(child_id);
                 }
@@ -457,8 +470,8 @@ impl World {
                     amount,
                     ..
                 } => {
-                    let donor = self.genome_by_id.get(*donor_id as usize).copied();
-                    let receiver = self.genome_by_id.get(*receiver_id as usize).copied();
+                    let donor = self.ecotype_by_id.get(*donor_id as usize).copied();
+                    let receiver = self.ecotype_by_id.get(*receiver_id as usize).copied();
                     if let (Some(donor), Some(receiver)) = (donor, receiver) {
                         if donor != receiver {
                             *self.interactions.entry((donor, receiver)).or_default() +=
@@ -690,16 +703,31 @@ impl World {
         1.0 - free / 65536.0
     }
 
-    /// Stable fingerprint of an organism's current bytes. Equal hashes are exact
-    /// genotypes for the purposes of the live observer.
+    /// Stable fingerprint of an organism's current bytes. Equal hashes represent
+    /// equal byte sequences; recognition state is intentionally represented by `Ecotype`.
     pub fn genome_hash(&self, program: &Program) -> u64 {
         genome_hash_in_memory(&self.memory, program)
     }
 
+    /// Heritable evolutionary identity combines executable bytes and recognition tag.
+    pub fn ecotype(&self, program: &Program) -> Ecotype {
+        Ecotype::new(self.genome_hash(program), program.tag)
+    }
+
+    /// Number of distinct live byte sequences, independent of recognition tag.
     pub fn live_genomes(&self) -> usize {
         self.programs
             .values()
             .map(|program| self.genome_hash(program))
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+    }
+
+    /// Number of distinct live byte-and-tag ecotypes.
+    pub fn live_ecotypes(&self) -> usize {
+        self.programs
+            .values()
+            .map(|program| self.ecotype(program))
             .collect::<std::collections::HashSet<_>>()
             .len()
     }
@@ -717,29 +745,29 @@ impl World {
         substitutions + genome.len().abs_diff(ancestor.len())
     }
 
-    /// Pick the strongest live candidate pair, preferring abundant genomes with
-    /// opposite A/B harvesting profiles. This is only hypothesis generation;
-    /// `counterfactual_symbiosis` performs the actual removal experiment.
-    pub fn candidate_partner_pair(&self) -> Option<(u64, u64)> {
-        let live_hashes: std::collections::HashSet<_> = self
+    /// Pick the strongest live candidate pair, preserving byte-and-tag clades and
+    /// preferring abundant ecotypes with opposite A/B harvesting profiles. This is
+    /// only hypothesis generation; `counterfactual_symbiosis` performs removal.
+    pub fn candidate_partner_pair(&self) -> Option<(Ecotype, Ecotype)> {
+        let live_ecotypes: std::collections::HashSet<_> = self
             .programs
             .values()
-            .map(|program| self.genome_hash(program))
+            .map(|program| self.ecotype(program))
             .collect();
-        let mut transferred_by_pair: HashMap<(u64, u64), u64> = HashMap::new();
+        let mut transferred_by_pair: HashMap<(Ecotype, Ecotype), u64> = HashMap::new();
         for (&(donor, receiver), &amount) in &self.interactions {
-            let active = |hash: u64| {
-                self.births_by_parent_genome
-                    .get(&hash)
+            let active = |ecotype: Ecotype| {
+                self.births_by_parent_ecotype
+                    .get(&ecotype)
                     .is_some_and(|births| *births >= 2)
                     && self
-                        .last_birth_by_genome
-                        .get(&hash)
+                        .last_birth_by_ecotype
+                        .get(&ecotype)
                         .is_some_and(|tick| self.tick.saturating_sub(*tick) <= 100_000)
             };
             if donor != receiver
-                && live_hashes.contains(&donor)
-                && live_hashes.contains(&receiver)
+                && live_ecotypes.contains(&donor)
+                && live_ecotypes.contains(&receiver)
                 && active(donor)
                 && active(receiver)
             {
@@ -765,37 +793,37 @@ impl World {
             b: u64,
             births: u64,
         }
-        let mut phenotypes: HashMap<u64, Phenotype> = HashMap::new();
+        let mut phenotypes: HashMap<Ecotype, Phenotype> = HashMap::new();
         for program in self.programs.values() {
-            let hash = self.genome_hash(program);
-            let phenotype = phenotypes.entry(hash).or_default();
+            let ecotype = self.ecotype(program);
+            let phenotype = phenotypes.entry(ecotype).or_default();
             phenotype.population += 1;
             phenotype.a += program.trace.opcode_counts[31];
             phenotype.b += program.trace.opcode_counts[37];
             phenotype.births = self
-                .births_by_parent_genome
-                .get(&hash)
+                .births_by_parent_ecotype
+                .get(&ecotype)
                 .copied()
                 .unwrap_or(0);
         }
         let mut live: Vec<_> = phenotypes.into_iter().collect();
         let has_active_pair = live
             .iter()
-            .filter(|(hash, phenotype)| {
+            .filter(|(ecotype, phenotype)| {
                 phenotype.births >= 2
                     && self
-                        .last_birth_by_genome
-                        .get(hash)
+                        .last_birth_by_ecotype
+                        .get(ecotype)
                         .is_some_and(|tick| self.tick.saturating_sub(*tick) <= 100_000)
             })
             .count()
             >= 2;
         if has_active_pair {
-            live.retain(|(hash, phenotype)| {
+            live.retain(|(ecotype, phenotype)| {
                 phenotype.births >= 2
                     && self
-                        .last_birth_by_genome
-                        .get(hash)
+                        .last_birth_by_ecotype
+                        .get(ecotype)
                         .is_some_and(|tick| self.tick.saturating_sub(*tick) <= 100_000)
             });
         }
@@ -805,8 +833,8 @@ impl World {
         let mut best = None;
         for left in 0..live.len() {
             for right in left + 1..live.len() {
-                let (hash_a, a) = &live[left];
-                let (hash_b, b) = &live[right];
+                let (ecotype_a, a) = &live[left];
+                let (ecotype_b, b) = &live[right];
                 let preference_a = a.a as f64 / (a.a + a.b).max(1) as f64;
                 let preference_b = b.a as f64 / (b.a + b.b).max(1) as f64;
                 let complement = (preference_a - preference_b).abs();
@@ -816,7 +844,7 @@ impl World {
                     + reproductive_evidence * 1_000.0
                     + complement * 10_000.0;
                 if best.is_none_or(|(_, _, best_score)| score > best_score) {
-                    best = Some((*hash_a, *hash_b, score));
+                    best = Some((*ecotype_a, *ecotype_b, score));
                 }
             }
         }
@@ -827,24 +855,24 @@ impl World {
     /// Reproduction is normalized by instructions executed, preventing the
     /// removed organisms' freed CPU share from masquerading as a benefit.
     pub fn counterfactual_symbiosis(&self, horizon: u64) -> Option<SymbiosisReport> {
-        let (genome_a, genome_b) = self.candidate_partner_pair()?;
+        let (ecotype_a, ecotype_b) = self.candidate_partner_pair()?;
         let mut intact = self.clone();
         let mut without_b = self.clone();
         let mut without_a = self.clone();
-        without_b.remove_genome(genome_b);
-        without_a.remove_genome(genome_a);
+        without_b.remove_ecotype(ecotype_b);
+        without_a.remove_ecotype(ecotype_a);
 
-        let intact_before = intact.measure_genomes(genome_a, genome_b);
-        let without_b_before = without_b.measure_genomes(genome_a, genome_b);
-        let without_a_before = without_a.measure_genomes(genome_a, genome_b);
+        let intact_before = intact.measure_ecotypes(ecotype_a, ecotype_b);
+        let without_b_before = without_b.measure_ecotypes(ecotype_a, ecotype_b);
+        let without_a_before = without_a.measure_ecotypes(ecotype_a, ecotype_b);
         for _ in 0..horizon {
             intact.tick();
             without_b.tick();
             without_a.tick();
         }
-        let intact_after = intact.measure_genomes(genome_a, genome_b);
-        let without_b_after = without_b.measure_genomes(genome_a, genome_b);
-        let without_a_after = without_a.measure_genomes(genome_a, genome_b);
+        let intact_after = intact.measure_ecotypes(ecotype_a, ecotype_b);
+        let without_b_after = without_b.measure_ecotypes(ecotype_a, ecotype_b);
+        let without_a_after = without_a.measure_ecotypes(ecotype_a, ecotype_b);
 
         let baseline_a = intact_after.0.saturating_sub(intact_before.0);
         let baseline_b = intact_after.1.saturating_sub(intact_before.1);
@@ -873,8 +901,8 @@ impl World {
             _ => RelationshipVerdict::Inconclusive,
         };
         Some(SymbiosisReport {
-            genome_a,
-            genome_b,
+            ecotype_a,
+            ecotype_b,
             horizon,
             baseline_births_a: baseline_a,
             baseline_births_b: baseline_b,
@@ -884,20 +912,20 @@ impl World {
         })
     }
 
-    fn measure_genomes(&self, a: u64, b: u64) -> (u64, u64, u64, u64) {
+    fn measure_ecotypes(&self, a: Ecotype, b: Ecotype) -> (u64, u64, u64, u64) {
         (
-            self.births_by_parent_genome.get(&a).copied().unwrap_or(0),
-            self.births_by_parent_genome.get(&b).copied().unwrap_or(0),
-            self.steps_by_genome.get(&a).copied().unwrap_or(0),
-            self.steps_by_genome.get(&b).copied().unwrap_or(0),
+            self.births_by_parent_ecotype.get(&a).copied().unwrap_or(0),
+            self.births_by_parent_ecotype.get(&b).copied().unwrap_or(0),
+            self.steps_by_ecotype.get(&a).copied().unwrap_or(0),
+            self.steps_by_ecotype.get(&b).copied().unwrap_or(0),
         )
     }
 
-    fn remove_genome(&mut self, genome: u64) {
+    fn remove_ecotype(&mut self, ecotype: Ecotype) {
         let ids: Vec<_> = self
             .programs
             .values()
-            .filter(|program| self.genome_hash(program) == genome)
+            .filter(|program| self.ecotype(program) == ecotype)
             .map(|program| program.id)
             .collect();
         for id in ids {
@@ -951,6 +979,7 @@ fn genome_hash_in_memory(memory: &Memory, program: &Program) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::identity::Ecotype;
     use std::path::PathBuf;
 
     /// Config that skips the templates directory so tests always fall back to the
@@ -960,6 +989,140 @@ mod tests {
             templates_dir: PathBuf::from("/nonexistent_soup_test_templates"),
             ..Config::default()
         }
+    }
+
+    fn add_seed_clone(world: &mut World, id: ProgramId, tag: u8) -> Ecotype {
+        let source = &world.programs[&0];
+        let bytes = world.memory.read_slice(source.start, source.length);
+        let start = world
+            .free_list
+            .alloc(source.length)
+            .expect("space for test organism");
+        world.memory.place(start, &bytes);
+        let mut program = Program::new(id, start, source.length, 1_000, Some(0), None, None);
+        program.tag = tag;
+        for offset in 0..program.length {
+            world.addr_to_owner[start.wrapping_add(offset) as usize] = Some(id);
+        }
+        if world.program_tags.len() <= id as usize {
+            world.program_tags.resize(id as usize + 1, 0);
+        }
+        world.program_tags[id as usize] = tag;
+        let ecotype = world.ecotype(&program);
+        world.programs.insert(id, program);
+        ecotype
+    }
+
+    #[test]
+    fn ecotype_distinguishes_recognition_tag_and_genome_collisions() {
+        let mut world = World::new(seed_config());
+        let program = world.programs[&0].clone();
+        let genome = world.genome_hash(&program);
+
+        let mut other_tag = program.clone();
+        other_tag.tag = 7;
+        assert_eq!(world.genome_hash(&other_tag), genome);
+        assert_ne!(world.ecotype(&program), world.ecotype(&other_tag));
+
+        let original_ecotype = world.ecotype(&program);
+        let mut other_genome = program.clone();
+        world.memory.write(other_genome.start, 255);
+        other_genome.tag = program.tag;
+        assert_ne!(original_ecotype, world.ecotype(&other_genome));
+    }
+
+    #[test]
+    fn offspring_inherit_parent_tag_and_lineage_event_identity() {
+        let mut cfg = seed_config();
+        cfg.initial_energy = 10_000;
+        cfg.mutation_rate = 0.0;
+        cfg.insertion_rate = 0.0;
+        cfg.deletion_rate = 0.0;
+        cfg.duplication_rate = 0.0;
+        cfg.tag_mutation_rate = 0.0;
+        let mut world = World::new(cfg);
+        world.programs.get_mut(&0).unwrap().tag = 23;
+        world.program_tags[0] = 23;
+
+        let born = (0..10_000).find_map(|_| {
+            world
+                .tick()
+                .into_iter()
+                .find(|event| matches!(event, Event::Born { .. }))
+        });
+
+        let Event::Born { id, ecotype, .. } = born.expect("tagged child") else {
+            unreachable!()
+        };
+        assert_eq!(ecotype.tag, 23);
+        assert_eq!(world.programs[&id].tag, 23);
+        assert_eq!(world.ecotype(&world.programs[&id]), ecotype);
+    }
+
+    #[test]
+    fn tag_mutation_creates_a_new_child_ecotype() {
+        let mut cfg = seed_config();
+        cfg.initial_energy = 10_000;
+        cfg.mutation_rate = 0.0;
+        cfg.insertion_rate = 0.0;
+        cfg.deletion_rate = 0.0;
+        cfg.duplication_rate = 0.0;
+        cfg.tag_mutation_rate = 1.0;
+        let mut world = World::new(cfg);
+        let parent_ecotype = world.ecotype(&world.programs[&0]);
+
+        let mut tag_change = None;
+        let child_id = (0..10_000).find_map(|_| {
+            let events = world.tick();
+            tag_change = tag_change.or_else(|| {
+                events.iter().find_map(|event| match event {
+                    Event::TagChanged {
+                        id,
+                        old_tag,
+                        new_tag,
+                        ..
+                    } => Some((*id, *old_tag, *new_tag)),
+                    _ => None,
+                })
+            });
+            events.into_iter().find_map(|event| match event {
+                Event::Born { id, .. } => Some(id),
+                _ => None,
+            })
+        });
+
+        let child_id = child_id.expect("mutated child");
+        let child = &world.programs[&child_id];
+        let (changed_id, old_tag, new_tag) = tag_change.expect("tag mutation event");
+        assert_eq!(changed_id, child_id);
+        assert_eq!(old_tag, parent_ecotype.tag);
+        assert_eq!(new_tag, child.tag);
+        assert_ne!(child.tag, parent_ecotype.tag);
+        assert_ne!(world.ecotype(child), parent_ecotype);
+    }
+
+    #[test]
+    fn candidate_selection_and_removal_preserve_tag_defined_clades() {
+        let mut world = World::new(seed_config());
+        world.programs.get_mut(&0).unwrap().tag = 3;
+        world.program_tags[0] = 3;
+        let first = world.ecotype(&world.programs[&0]);
+        let second = add_seed_clone(&mut world, 1, 9);
+        assert_eq!(world.live_genomes(), 1);
+        assert_eq!(world.live_ecotypes(), 2);
+
+        let pair = world.candidate_partner_pair().expect("two tag clades");
+        assert_eq!(
+            std::collections::HashSet::from([pair.0, pair.1]),
+            [first, second].into()
+        );
+
+        world.remove_ecotype(first);
+        assert_eq!(world.live_count(), 1);
+        assert_eq!(
+            world.ecotype(world.programs.values().next().unwrap()),
+            second
+        );
     }
 
     #[test]

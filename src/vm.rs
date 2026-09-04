@@ -1110,6 +1110,55 @@ mod tests {
     }
 
     #[test]
+    fn commit_and_split_inherit_recognition_tag() {
+        for opcode in [26u8, 27u8] {
+            let code = [25u8, opcode];
+            let (mut p, mut mem, mut fl) = make_program(&code, 100);
+            p.reg_a = 1;
+            p.tag = 91;
+            let cfg = Config::default();
+            let mut next_id = 100;
+            let mut rng = StdRng::seed_from_u64(0);
+            let mut events = Vec::new();
+            let mut ambient = 0;
+
+            assert!(matches!(
+                step(
+                    &mut p,
+                    &mut mem,
+                    &mut fl,
+                    &NO_OWNERS,
+                    &NO_TAGS,
+                    &cfg,
+                    &mut next_id,
+                    &mut rng,
+                    &mut events,
+                    0,
+                    &mut ambient,
+                ),
+                StepResult::Continue
+            ));
+            let result = step(
+                &mut p,
+                &mut mem,
+                &mut fl,
+                &NO_OWNERS,
+                &NO_TAGS,
+                &cfg,
+                &mut next_id,
+                &mut rng,
+                &mut events,
+                1,
+                &mut ambient,
+            );
+            let StepResult::Spawned(child) = result else {
+                panic!("opcode {opcode} did not spawn");
+            };
+            assert_eq!(child.tag, 91, "opcode {opcode}");
+        }
+    }
+
+    #[test]
     fn seek_tag_finds_matching_partner() {
         let code = [43u8, 255];
         let (mut p, mut mem, mut fl) = make_program(&code, 100);
@@ -1136,6 +1185,41 @@ mod tests {
             &mut ambient,
         );
         assert_eq!(p.reg_b, 123);
+        assert_eq!(p.trace.tag_seeks, 1);
+    }
+
+    #[test]
+    fn seek_tag_skips_self_and_nonmatching_tag_collisions() {
+        let code = [43u8, 255];
+        let (mut p, mut mem, mut fl) = make_program(&code, 100);
+        p.reg_a = 7;
+        p.rh = 100;
+        let mut owners = vec![None; 65536];
+        owners[100] = Some(p.id);
+        owners[101] = Some(2);
+        owners[102] = Some(3);
+        let tags = [0, 7, 8, 7];
+        let cfg = Config::default();
+        let mut next_id = 100;
+        let mut rng = StdRng::seed_from_u64(0);
+        let mut events = Vec::new();
+        let mut ambient = 0;
+
+        let _ = step(
+            &mut p,
+            &mut mem,
+            &mut fl,
+            &owners,
+            &tags,
+            &cfg,
+            &mut next_id,
+            &mut rng,
+            &mut events,
+            0,
+            &mut ambient,
+        );
+
+        assert_eq!(p.reg_b, 102);
         assert_eq!(p.trace.tag_seeks, 1);
     }
 
