@@ -218,6 +218,8 @@ impl Config {
                 c.resource_sources = file_cfg.resource_sources;
                 c.foreign_exec_tracking = file_cfg.foreign_exec_tracking;
                 c.foreign_write_tracking = file_cfg.foreign_write_tracking;
+                c.log_path = file_cfg.log_path;
+                c.templates_dir = file_cfg.templates_dir;
             }
         }
 
