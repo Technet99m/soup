@@ -147,6 +147,8 @@ Substitution is applied only during **replication COPY**: `COPY` must target the
 - Global rates initialize startup ancestors only. `COMMIT` and `SPLIT` inherit the parent's current strategy; config does not overwrite descendants.
 - At birth, inherited structural weights select at most one insertion, deletion, or duplication. A strategy-self-mutation selects one locus uniformly and takes an unbiased higher/lower saturating step of 12.5% (at least one fixed-point unit). Both higher- and lower-fidelity descendants are reachable.
 - Every draw is blind to viability, survival, observed behavior, fitness, and intended outcome. Mutated offspring are never filtered or repaired.
+- Selecting a structural operator always produces an explicit event. A realized edit emits `STRUCTURAL_MUTATION`. If the configured length bounds reject it, or if no physical allocation can hold a growth edit, the child keeps the inherited bytes and emits `STRUCTURAL_MUTATION_FAILED` with `minimum_length`, `maximum_length`, or `no_space`. Failed edits do not increment the realized-mutation counter.
+- Structural-mutation admission uses only the selected operator, genome bytes and length, configured length bounds, and physical allocator state. It never inspects viability, behavior, lineage success, or fitness.
 - `COMMIT` and `SPLIT` copy the parent's current recognition tag to the child before birth mutation.
 - A child's inherited recognition tag can mutate independently at birth according to `TAG_MUTATION_RATE`; a triggered mutation always chooses a different tag.
 - `SET_TAG` changes only the executing organism's current tag. Existing deposits and emitted lineage events retain their earlier snapshots.
@@ -160,6 +162,8 @@ Behavior traces increment the canonical decoded instruction index, so synonymous
 - A **free list** tracks unoccupied memory ranges
 - `ALLOC` usually chooses the closest fitting location to the parent; a configurable fraction uses global best fit
 - If no block is large enough: instruction is a no-op (costs energy anyway)
+- A birth-time growth edit first claims the exact non-wrapping free suffix immediately after the child's existing block. If that suffix is unavailable, it allocates a separate block for the complete resized genome near the parent and releases the old child block only after the new allocation succeeds.
+- Growth installation is atomic: allocation failure leaves memory, the child's allocation and ownership registration, pending allocations, energy, and free-list accounting unchanged. The already committed child is still born with its unedited inherited genome, and the preceding `STRUCTURAL_MUTATION_FAILED` event records the selected operator and attempted length.
 - Freed memory is not zeroed — it retains old values (fossil data, potential parasite fuel)
 
 ---
