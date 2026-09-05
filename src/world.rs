@@ -2143,6 +2143,7 @@ mod tests {
         cfg.duplication_rate = 0.0;
         cfg.tag_mutation_rate = 0.0;
         cfg.max_genome_length = 64;
+        let inherited_strategy = cfg.ancestor_mutation_strategy();
         let mut world = World::new(cfg);
         let start = 1_000u16;
         let bytes = [10, 20, 30, 40];
@@ -2155,7 +2156,8 @@ mod tests {
                 (free_end as u16, (65_536 - free_end) as u16),
             ],
         );
-        let child = Program::new(99, start, bytes.len() as u16, 321, Some(0), None, None);
+        let mut child = Program::new(99, start, bytes.len() as u16, 321, Some(0), None, None);
+        child.mutation_strategy = inherited_strategy;
         (world, child)
     }
 
