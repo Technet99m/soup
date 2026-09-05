@@ -66,7 +66,7 @@ pub enum Event {
         parent_id: ProgramId,
         kind: StructuralMutationKind,
         old_length: u16,
-        attempted_length: u16,
+        attempted_length: u32,
         reason: StructuralMutationFailureReason,
     },
     TagChanged {

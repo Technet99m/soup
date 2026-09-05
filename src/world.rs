@@ -803,9 +803,9 @@ impl World {
             let new_length = genome.len() as u16;
             if let Some(reason) = admission_failure {
                 let attempted_length = match kind {
-                    StructuralMutationKind::Insertion => old_length.saturating_add(1),
-                    StructuralMutationKind::Deletion => old_length.saturating_sub(1),
-                    StructuralMutationKind::Duplication => old_length.saturating_add(1),
+                    StructuralMutationKind::Insertion => old_length as u32 + 1,
+                    StructuralMutationKind::Deletion => old_length.saturating_sub(1) as u32,
+                    StructuralMutationKind::Duplication => old_length as u32 + 1,
                 };
                 events.push(Event::StructuralMutationFailed {
                     tick: self.tick,
@@ -837,7 +837,7 @@ impl World {
                     parent_id: child.parent_id.unwrap_or_default(),
                     kind,
                     old_length,
-                    attempted_length: new_length,
+                    attempted_length: new_length as u32,
                     reason: StructuralMutationFailureReason::NoSpace,
                 });
             }
