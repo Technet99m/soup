@@ -17,10 +17,13 @@ commit_cost           = 20     # energy cost to commit (reproduce)
 max_program_age       = 20_000 # executed instructions before an organism wears out
 
 # --- Simulation ---
-mutation_rate         = 0.005
+# These five rates initialize startup ancestors. Descendants inherit fixed-point
+# copies and can move every rate up or down; later config changes do not overwrite them.
+mutation_rate         = 0.005 # replication COPY errors (not WRITE/attacks/work memory)
 insertion_rate        = 0.004 # per birth; inserts one random instruction
 deletion_rate         = 0.004 # per birth; deletes a short instruction span
 duplication_rate      = 0.004 # per birth; copies a short instruction span
+strategy_mutation_rate = 0.01 # per birth; mutate one strategy locus by +/- 12.5%
 max_genome_length     = 512
 child_locality_bias   = 0.92  # most children are allocated beside their parent
 tag_mutation_rate     = 0.01  # heritable partner-recognition marker

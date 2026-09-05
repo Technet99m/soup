@@ -85,7 +85,8 @@ pub fn step(
     *ambient += 1;
 
     let raw_opcode = mem.read(p.ip);
-    let executing_heritable_identity = HeritableIdentity::new(genome_hash(mem, p), p.tag);
+    let executing_heritable_identity =
+        HeritableIdentity::with_strategy(genome_hash(mem, p), p.tag, p.mutation_strategy);
     let opcode = Opcode::from(raw_opcode);
     p.trace.record(opcode);
     let ip = p.ip;
@@ -134,16 +135,10 @@ pub fn step(
                     }
                 }
             }
-            let (stored, mutated) =
-                mem.write_mutating(p.wh, (p.reg_a & 0xFF) as u8, rng, cfg.mutation_rate);
-            if mutated {
-                events.push(Event::Mutated {
-                    tick,
-                    address: p.wh,
-                    old_value: (p.reg_a & 0xFF) as u8,
-                    new_value: stored,
-                });
-            }
+            // WRITE is exact. Heritable replication fidelity only governs COPY
+            // into the organism's reserved child allocation, never attacks or
+            // working-memory writes.
+            mem.write(p.wh, (p.reg_a & 0xFF) as u8);
         }
 
         // COPY: copy mem[RH] → mem[WH], then advance both heads by 1.
@@ -160,7 +155,16 @@ pub fn step(
                     }
                 }
             }
-            let (original, stored) = mem.copy_cell_mutating(p.rh, p.wh, rng, cfg.mutation_rate);
+            let original = mem.read(p.rh);
+            let is_replication = p
+                .pending_allocation
+                .is_some_and(|(start, length)| p.wh.wrapping_sub(start) < length);
+            let stored = if is_replication && p.mutation_strategy.copy_mutates(rng.gen()) {
+                crate::mutation::substitute(original, rng.gen())
+            } else {
+                original
+            };
+            mem.write(p.wh, stored);
             if stored != original {
                 events.push(Event::Mutated {
                     tick,
@@ -313,6 +317,7 @@ pub fn step(
                 );
                 child.generation = p.generation.saturating_add(1);
                 child.tag = p.tag;
+                child.mutation_strategy = p.mutation_strategy;
                 child.metabolite_a = p.metabolite_a / 2;
                 child.metabolite_b = p.metabolite_b / 2;
                 p.metabolite_a -= child.metabolite_a;
@@ -359,6 +364,7 @@ pub fn step(
                 );
                 child.generation = p.generation.saturating_add(1);
                 child.tag = p.tag;
+                child.mutation_strategy = p.mutation_strategy;
                 child.metabolite_a = p.metabolite_a / 2;
                 child.metabolite_b = p.metabolite_b / 2;
                 p.metabolite_a -= child.metabolite_a;
@@ -657,6 +663,122 @@ mod tests {
     use crate::seed::SEED;
     use rand::rngs::StdRng;
     use rand::SeedableRng;
+
+    #[test]
+    fn mutation_strategy_only_affects_replication_copy() {
+        let cfg = Config::default();
+        let mut next_id = 100;
+        let mut rng = StdRng::seed_from_u64(0);
+        let mut events = Vec::new();
+        let mut ambient = 0;
+
+        let (mut writer, mut memory, mut free_list) = make_program(&[u8::from(Opcode::Write)], 100);
+        writer.wh = 100;
+        writer.reg_a = 7;
+        writer.mutation_strategy.copy_error_rate = 65_536;
+        step(
+            &mut writer,
+            &mut memory,
+            &mut free_list,
+            &NO_OWNERS,
+            &NO_TAGS,
+            &cfg,
+            &mut next_id,
+            &mut rng,
+            &mut events,
+            1,
+            &mut ambient,
+        );
+        assert_eq!(memory.read(100), 7, "WRITE must remain exact");
+
+        let (mut copier, mut memory, mut free_list) = make_program(&[u8::from(Opcode::Copy)], 100);
+        memory.write(20, 1);
+        copier.rh = 20;
+        copier.wh = 100;
+        copier.mutation_strategy.copy_error_rate = 65_536;
+        step(
+            &mut copier,
+            &mut memory,
+            &mut free_list,
+            &NO_OWNERS,
+            &NO_TAGS,
+            &cfg,
+            &mut next_id,
+            &mut rng,
+            &mut events,
+            2,
+            &mut ambient,
+        );
+        assert_eq!(
+            memory.read(100),
+            1,
+            "non-replication COPY must remain exact"
+        );
+
+        copier.ip = 0;
+        copier.rh = 20;
+        copier.wh = 101;
+        copier.pending_allocation = Some((101, 1));
+        step(
+            &mut copier,
+            &mut memory,
+            &mut free_list,
+            &NO_OWNERS,
+            &NO_TAGS,
+            &cfg,
+            &mut next_id,
+            &mut rng,
+            &mut events,
+            3,
+            &mut ambient,
+        );
+        assert_ne!(
+            memory.read(101),
+            1,
+            "replication COPY must use inherited fidelity"
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            Event::Mutated {
+                address: 101,
+                old_value: 1,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn commit_and_split_inherit_mutation_strategy() {
+        for opcode in [Opcode::Commit, Opcode::Split] {
+            let (mut parent, mut memory, mut free_list) = make_program(&[u8::from(opcode)], 10_000);
+            parent.reg_a = 1;
+            parent.reg_b = 100;
+            parent.pending_allocation = Some((100, 1));
+            parent.mutation_strategy = crate::mutation::MutationStrategy::new(1, 2, 3, 4, 5);
+            let expected = parent.mutation_strategy;
+            let mut next_id = 100;
+            let mut rng = StdRng::seed_from_u64(0);
+            let mut events = Vec::new();
+            let mut ambient = 0;
+
+            let StepResult::Spawned(child) = step(
+                &mut parent,
+                &mut memory,
+                &mut free_list,
+                &NO_OWNERS,
+                &NO_TAGS,
+                &Config::default(),
+                &mut next_id,
+                &mut rng,
+                &mut events,
+                1,
+                &mut ambient,
+            ) else {
+                panic!("{opcode:?} did not spawn");
+            };
+            assert_eq!(child.mutation_strategy, expected);
+        }
+    }
 
     /// Empty ownership map used in tests that don't exercise foreign-ownership opcodes.
     static NO_OWNERS: [Option<ProgramId>; 65536] = [None; 65536];

@@ -25,7 +25,7 @@ pub enum Event {
         length: u16,
         energy: u32,
         generation: u32,
-        /// The child's byte genome plus recognition tag at birth.
+        /// The child's byte genome, recognition tag, and mutation strategy at birth.
         heritable_identity: HeritableIdentity,
     },
     /// Emitted once, only after behavior has persisted and reproduced through

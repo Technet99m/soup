@@ -1,22 +1,36 @@
+use crate::mutation::MutationStrategy;
 use crate::program::BehaviorTrace;
 use serde::{Deserialize, Serialize};
 
 /// Heritable evolutionary identity used by ecology and lineage reporting.
 ///
-/// Genome bytes and the recognition tag are independent identity dimensions:
-/// offspring inherit the parent's tag, `SET_TAG` changes it during life, and
-/// `tag_mutation_rate` may replace it at birth. Keeping the tag explicit avoids
-/// collapsing equal byte sequences that recognize different partners, while
-/// retaining the genome hash prevents equal tags from collapsing distinct code.
+/// Genome bytes, recognition tag, and mutation strategy are identity dimensions:
+/// Offspring inherit the parent's tag and strategy. Either can mutate at birth,
+/// while `SET_TAG` changes the tag during life. Explicit extra-genomic fields
+/// keep equal byte sequences with different ecological/evolutionary controls in
+/// separate clades; the genome hash keeps distinct code separate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct HeritableIdentity {
     pub genome: u64,
     pub tag: u8,
+    pub mutation_strategy: MutationStrategy,
 }
 
 impl HeritableIdentity {
-    pub const fn new(genome: u64, tag: u8) -> Self {
-        Self { genome, tag }
+    pub fn new(genome: u64, tag: u8) -> Self {
+        Self {
+            genome,
+            tag,
+            mutation_strategy: MutationStrategy::default(),
+        }
+    }
+
+    pub const fn with_strategy(genome: u64, tag: u8, mutation_strategy: MutationStrategy) -> Self {
+        Self {
+            genome,
+            tag,
+            mutation_strategy,
+        }
     }
 }
 
@@ -26,7 +40,7 @@ impl HeritableIdentity {
 /// so two organisms that run the same operations for different durations are
 /// behaviorally equivalent. An ecotype still keeps a representative raw genome
 /// for provenance, while equivalence deliberately collapses different genomes
-/// when their recognition tag and behavior signature match.
+/// when their recognition tag, mutation strategy, and behavior signature match.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct BehaviorSignature {
     pub opcode_presence: u64,
@@ -81,6 +95,7 @@ impl EcotypeIdentity {
     pub fn equivalence(self) -> EcotypeEquivalence {
         EcotypeEquivalence {
             tag: self.heritable_identity.tag,
+            mutation_strategy: self.heritable_identity.mutation_strategy,
             behavior: self.behavior,
         }
     }
@@ -90,12 +105,34 @@ impl EcotypeIdentity {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct EcotypeEquivalence {
     pub tag: u8,
+    pub mutation_strategy: MutationStrategy,
     pub behavior: BehaviorSignature,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mutation_strategy_is_part_of_clade_and_ecotype_identity() {
+        let behavior = BehaviorSignature {
+            opcode_presence: 1,
+            effect_presence: 2,
+        };
+        let low = MutationStrategy::new(100, 10, 10, 10, 10);
+        let high = MutationStrategy::new(1_000, 10, 10, 10, 10);
+        let first = EcotypeIdentity {
+            heritable_identity: HeritableIdentity::with_strategy(7, 9, low),
+            behavior,
+        };
+        let second = EcotypeIdentity {
+            heritable_identity: HeritableIdentity::with_strategy(7, 9, high),
+            behavior,
+        };
+
+        assert_ne!(first.heritable_identity, second.heritable_identity);
+        assert_ne!(first.equivalence(), second.equivalence());
+    }
 
     #[test]
     fn ecotype_identity_has_a_total_lexicographic_order() {

@@ -481,10 +481,7 @@ mod tests {
     }
 
     fn identity(genome: u64) -> HeritableIdentity {
-        HeritableIdentity {
-            genome,
-            tag: genome as u8,
-        }
+        HeritableIdentity::new(genome, genome as u8)
     }
 
     fn pair(a: u64, b: u64) -> (HeritableIdentity, HeritableIdentity) {
