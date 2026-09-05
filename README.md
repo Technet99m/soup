@@ -68,3 +68,15 @@ LOG_PATH=/tmp/soup.log cargo run --release --bin soup -- \
 Configuration lives in `soup.toml`; `counterfactual_replicates` (or `COUNTERFACTUAL_REPLICATES`) sets the default replicate count. Resource sources have independently configurable chemistry, position, cadence, amount, width, and velocity. Their shared spatial origin is derived from `rng_seed`, and the ancestor is placed there so it can reach both chemistries without any source targeting live organisms. The other templates are retained as optional inoculations, but only `templates/01_ancestor.toml` has `seed = true` by default. Every default descendant therefore comes from the same minimal ancestor.
 
 Resource movement and metabolism are bounded per scheduler turn. `max_resource_flux_per_instruction` caps every A/B `TAKE` and `EXCRETE`; `max_metabolism_per_instruction` caps every A/B `CONVERT` and the number of A+B pairs processed by `COMBINE_AB`. Register B remains the requested quantity, except B=0 requests the configured metabolic maximum rather than an unlimited conversion. The 256-unit defaults exceed each default source emission (at most 200 units), preserve the ancestor's deterministic long-run viability, and still prevent a single instruction from moving an accumulated `u32` store. These caps are physical rules only: they do not inspect identity, behavior, lineage, reproduction, or fitness.
+For deterministic emergence-probability experiments across independent seeds:
+
+```sh
+cargo run --release --bin soup-batch -- \
+  --seeds 1000..=1099 --ticks 1000000 \
+  --counterfactual --counterfactual-horizon 100000 \
+  --config soup.toml --output experiments/emergence.json
+```
+
+The batch runner checkpoints versioned JSON after every seed, resumes without rerunning completed replicates, records per-seed failures, and reports Wilson 95% intervals plus count summaries. See [docs/batch-experiments.md](docs/batch-experiments.md) for seed-file usage, output semantics, and the no-fitness-feedback boundary.
+
+Configuration lives in `soup.toml`. Resource sources have independently configurable chemistry, position, cadence, amount, width, and velocity. Their shared spatial origin is derived from `rng_seed`, and the ancestor is placed there so it can reach both chemistries without any source targeting live organisms. The other templates are retained as optional inoculations, but only `templates/01_ancestor.toml` has `seed = true` by default. Every default descendant therefore comes from the same minimal ancestor.

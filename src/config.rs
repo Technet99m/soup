@@ -1,10 +1,10 @@
 use crate::events::ResourceKind;
 use crate::mutation::MutationStrategy;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-#[serde(default)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
 pub struct ResourceSource {
     /// Resource-map address relative to the seed-derived environment origin.
     pub offset: u16,
@@ -32,8 +32,8 @@ impl Default for ResourceSource {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub memory_size: usize,
     pub initial_energy: u32,
@@ -92,11 +92,9 @@ pub struct Config {
     pub foreign_exec_tracking: bool,
     /// Emit ForeignWrite events when a program writes to another program's region. Default: true.
     pub foreign_write_tracking: bool,
-    #[serde(skip)]
     pub log_path: PathBuf,
     /// Directory containing `*.toml` template files. Default: "templates".
     /// Falls back to hardcoded SEED if missing or empty.
-    #[serde(skip)]
     pub templates_dir: PathBuf,
 }
 
@@ -185,7 +183,10 @@ impl Config {
         // Try loading TOML file
         let config_path = std::env::var("SOUP_CONFIG").unwrap_or_else(|_| "soup.toml".to_string());
         if let Ok(contents) = std::fs::read_to_string(&config_path) {
-            if let Ok(file_cfg) = toml::from_str::<Config>(&contents) {
+            let file_cfg = toml::from_str::<Config>(&contents).unwrap_or_else(|error| {
+                panic!("invalid TOML in {config_path}: {error}");
+            });
+            {
                 // Overlay file values onto defaults
                 c.initial_energy = file_cfg.initial_energy;
                 c.mutation_rate = file_cfg.mutation_rate;
@@ -217,6 +218,8 @@ impl Config {
                 c.resource_sources = file_cfg.resource_sources;
                 c.foreign_exec_tracking = file_cfg.foreign_exec_tracking;
                 c.foreign_write_tracking = file_cfg.foreign_write_tracking;
+                c.log_path = file_cfg.log_path;
+                c.templates_dir = file_cfg.templates_dir;
             }
         }
 

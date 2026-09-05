@@ -1,4 +1,5 @@
 pub mod allocator;
+pub mod batch;
 mod canonical;
 pub mod config;
 pub mod counterfactual;
