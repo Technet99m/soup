@@ -706,15 +706,21 @@ impl World {
             .get(&id)
             .map(|program| self.heritable_identity(program))
             .unwrap_or(HeritableIdentity::new(0, 0));
+        let will_execute = self
+            .programs
+            .get(&id)
+            .is_some_and(|program| program.energy > 0);
         self.segment_identity_change(id, executing_heritable_identity);
         if let Some(heritable_identity) = self.heritable_identity_by_id.get_mut(id as usize) {
             *heritable_identity = executing_heritable_identity;
         }
-        *self
-            .steps_by_heritable_identity
-            .entry(executing_heritable_identity)
-            .or_default() += 1;
-        *self.steps_by_program_id.entry(id).or_default() += 1;
+        if will_execute {
+            *self
+                .steps_by_heritable_identity
+                .entry(executing_heritable_identity)
+                .or_default() += 1;
+            *self.steps_by_program_id.entry(id).or_default() += 1;
+        }
         let write_victim = self.programs.get(&id).and_then(|program| {
             matches!(
                 Opcode::from(self.memory.read(program.ip)),
@@ -2921,6 +2927,18 @@ mod tests {
             "ancestor should reproduce from fixed sources"
         );
         assert!(world.live_count() > 0, "the lineage should remain alive");
+    }
+
+    #[test]
+    fn zero_energy_death_turn_does_not_count_as_executed_step() {
+        let mut world = World::new(seed_config());
+        world.programs.get_mut(&0).unwrap().energy = 0;
+        let identity = world.heritable_identity(&world.programs[&0]);
+
+        world.tick();
+
+        assert!(!world.steps_by_program_id.contains_key(&0));
+        assert!(!world.steps_by_heritable_identity.contains_key(&identity));
     }
 
     #[test]
