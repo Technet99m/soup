@@ -213,6 +213,8 @@ COMMIT               ; child size comes from A
 - On `COMMIT`/`SPLIT`: child inherits the parent's lineage chain, current recognition tag, and mutation strategy before independent birth mutations are applied.
 - Substitutions and structural genome edits are emitted as events
 - A `HeritableIdentity` is the raw `(genome hash, recognition tag, mutation strategy)` tuple used for lineage, clade, activity, transfer, and counterfactual accounting. Raw genome counts remain independent of extra-genomic state.
+- A counterfactual focal clade starts with every snapshot-time organism having one tested `HeritableIdentity`, then follows explicit `parent_id` links. Descendants remain members through genome, recognition-tag, and behavior changes; this ancestry grouping is not an `EcotypeIdentity` or behavioral-equivalence claim.
+- Replicate-specific endogenous randomness is paired across intact, sham-intact, and removal branches. External resource schedules remain pure functions of seed, tick, and source configuration. Clade step, birth, and transfer maps are observer-only and never enter scheduling, mutation, resource allocation, fitness, or selection.
 - This allows a **full evolutionary tree** to be reconstructed from logs
 
 ---
@@ -272,6 +274,7 @@ MAX_RESOURCE_FLUX_PER_INSTRUCTION default: 256 A/B units per TAKE or EXCRETE
 MAX_METABOLISM_PER_INSTRUCTION    default: 256 A/B units or A+B pairs
 LOOP_MAX_DEPTH      default: 8
 TICKS_PER_STAT_LOG  default: 10000
+COUNTERFACTUAL_REPLICATES default: 8; fewer than 2 can only be Inconclusive
 ENERGY_CURRENT      default: 17
 RESOURCE_SOURCES    default: four A/B emitters configured by offset, interval,
                     amount, width, and velocity in soup.toml
@@ -313,8 +316,8 @@ actual built-in ancestor name and bytes contribute. Changing template names,
 genomes, or the order of distinct templates changes the namespace, even if seed
 and starting placements happen to match.
 
-Log paths, template directory paths, statistics frequency, ecotype viability
-thresholds, and foreign execution/write logging switches do not affect run or
+Log paths, template directory paths, statistics frequency, counterfactual replicate
+count, ecotype viability thresholds, and foreign execution/write logging switches do not affect run or
 lineage identity. The legacy
 `Config::memory_size` field is not effective: this VM always has 65,536 cells,
 and that fixed size is encoded instead. Configuration changes after construction
@@ -388,11 +391,13 @@ fingerprint without changing the world or consuming randomness. It covers:
 - Each allocator block's start and full `u32` length in allocator order; tick,
   next ID, ambient pool, all birth/death/mutation/foreign-event counters, maximum
   generation, ownership map, tag history, identity history, all per-identity
-  accounting maps, interactions, template names/genomes, namespace, and history.
+  accounting maps (including per-program counterfactual step accounting), interactions,
+  template names/genomes, namespace, and history.
 - Current effective configuration, including the complete ordered source
   schedule. Origin and emission phase are determined by seed and tick; there is
   no hidden schedule RNG or mutable source cursor. Unlike lineage hashing, public
-  state includes foreign tracking switches and their counters because these
+  state includes the counterfactual replicate count because it determines observer
+  output. It also includes foreign tracking switches and their counters because these
   determine observable events. Ecotype viability thresholds, completed behavior
   archives, active segment bookkeeping, viable result cache, and the set of
   already-announced equivalence classes are also included because they determine
@@ -407,7 +412,8 @@ fingerprint without changing the world or consuming randomness. It covers:
 Encoding is explicit, not Rust `Hash`, `Debug`, serde object layout, or
 `DefaultHasher`. Every encoding starts with length-prefixed `soup/canonical/v1`
 and a distinct domain: `run-namespace/v1`, `standalone-program/v1`,
-`startup-lineage/v1`, `birth-state/v1`, `birth-lineage/v1`, or `public-state/v1`.
+`startup-lineage/v1`, `birth-state/v1`, `birth-lineage/v1`,
+`counterfactual-replicate/v1`, or `public-state/v1`.
 Configuration also carries `effective-config/v2`. Fields have fixed schema order.
 Integers use their declared width in little endian; `usize` values and collection/
 string lengths use `u64`. Floats encode their IEEE-754 `u64` bits. Strings encode

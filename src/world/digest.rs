@@ -43,6 +43,7 @@ impl World {
             viable_ecotypes_cache,
             interactions,
             steps_by_heritable_identity,
+            steps_by_program_id,
             total_births,
             total_deaths,
             total_mutations,
@@ -64,6 +65,7 @@ impl World {
             out.value(&config.ecotype_min_persistence_ticks);
             out.value(&config.ecotype_min_reproductive_output);
             out.value(&config.ecotype_min_descendant_generations);
+            out.value(&config.counterfactual_replicates);
             out.value(total_foreign_execs);
             out.value(total_foreign_writes);
         }
@@ -119,6 +121,9 @@ impl World {
         }
         out.map(interactions);
         out.map(steps_by_heritable_identity);
+        if include_observers {
+            out.map(steps_by_program_id);
+        }
         out.value(total_births);
         out.value(total_deaths);
         out.value(total_mutations);

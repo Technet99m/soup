@@ -188,8 +188,14 @@ impl TrialReporter {
 }
 
 enum TrialRunResult {
-    Completed(SymbiosisReport),
+    Completed(Box<SymbiosisReport>),
     Cancelled,
+}
+
+impl TrialRunResult {
+    fn completed(report: SymbiosisReport) -> Self {
+        Self::Completed(Box::new(report))
+    }
 }
 
 struct ActiveTrial {
@@ -209,23 +215,29 @@ pub struct TrialWorker {
 
 impl TrialWorker {
     pub fn start(&mut self, snapshot: TrialSnapshot, horizon: u64) -> Result<(), TrialStartError> {
-        self.start_with(snapshot, horizon, |snapshot, horizon, reporter| {
-            let interval = (horizon / 100).max(1);
+        let total = horizon.saturating_mul(snapshot.world.config.counterfactual_replicates as u64);
+        let result = self.start_with(snapshot, horizon, move |snapshot, horizon, reporter| {
+            let interval = (total / 100).max(1);
             let pair = snapshot.heritable_identity_pair;
             let report = snapshot
                 .world
                 .counterfactual_symbiosis_for_pair_with_control(pair, horizon, |completed| {
-                    if completed == 0 || completed == horizon || completed.is_multiple_of(interval)
-                    {
-                        reporter.progress(completed, horizon);
+                    if completed == 0 || completed == total || completed.is_multiple_of(interval) {
+                        reporter.progress(completed, total);
                     }
                     !reporter.is_cancelled()
                 });
             match report {
-                Some(report) => TrialRunResult::Completed(report),
+                Some(report) => TrialRunResult::completed(report),
                 None => TrialRunResult::Cancelled,
             }
-        })
+        });
+        if result.is_ok() {
+            if let Some(progress) = &mut self.progress {
+                progress.total = total;
+            }
+        }
+        result
     }
 
     fn start_with<F>(
@@ -284,7 +296,7 @@ impl TrialWorker {
             {
                 Ok(TrialRunResult::Completed(report)) => TrialEvent::Completed {
                     source_tick,
-                    report,
+                    report: *report,
                 },
                 Ok(TrialRunResult::Cancelled) => TrialEvent::Cancelled {
                     source_tick,
@@ -467,7 +479,7 @@ mod tests {
     use super::*;
     use crate::{
         config::Config,
-        world::{RelationshipVerdict, SymbiosisReport},
+        world::{ConfidenceInterval, DirectTransferEvidence, RelationshipVerdict, SymbiosisReport},
     };
     use std::{io, path::PathBuf, sync::mpsc};
 
@@ -502,6 +514,7 @@ mod tests {
 
     fn report(pair: (HeritableIdentity, HeritableIdentity), horizon: u64) -> SymbiosisReport {
         SymbiosisReport {
+            source_state_digest: Some("test-source-state".into()),
             heritable_identity_a: pair.0,
             heritable_identity_b: pair.1,
             horizon,
@@ -509,6 +522,19 @@ mod tests {
             baseline_births_b: 4,
             dependence_a: 0.25,
             dependence_b: 0.5,
+            dependence_a_interval: Some(ConfidenceInterval {
+                lower: 0.2,
+                upper: 0.3,
+            }),
+            dependence_b_interval: Some(ConfidenceInterval {
+                lower: 0.4,
+                upper: 0.6,
+            }),
+            dependence_a_samples: 8,
+            dependence_b_samples: 8,
+            replicates: 8,
+            direct_transfer: DirectTransferEvidence::default(),
+            control_failures: 0,
             verdict: RelationshipVerdict::Mutualism,
         }
     }
@@ -535,7 +561,7 @@ mod tests {
             .start_with(snapshot, 10, move |snapshot, horizon, reporter| {
                 reporter.progress(4, horizon);
                 done_tx.send(()).unwrap();
-                TrialRunResult::Completed(report(snapshot.heritable_identity_pair(), horizon))
+                TrialRunResult::completed(report(snapshot.heritable_identity_pair(), horizon))
             })
             .unwrap();
         done_rx.recv().unwrap();
@@ -631,7 +657,7 @@ mod tests {
                 TrialSnapshot::capture_for_pair(&world_at(2), pair(3, 4)),
                 10,
                 |snapshot, horizon, _| {
-                    TrialRunResult::Completed(report(snapshot.heritable_identity_pair(), horizon))
+                    TrialRunResult::completed(report(snapshot.heritable_identity_pair(), horizon))
                 },
             )
             .unwrap_err();
@@ -702,7 +728,7 @@ mod tests {
                 10,
                 |_job| Ok(std::thread::spawn(|| {})),
                 |snapshot, horizon, _| {
-                    TrialRunResult::Completed(report(snapshot.heritable_identity_pair(), horizon))
+                    TrialRunResult::completed(report(snapshot.heritable_identity_pair(), horizon))
                 },
             )
             .unwrap();
@@ -727,7 +753,7 @@ mod tests {
             10,
             |_job| Err::<JoinHandle<()>, _>(io::Error::other("sensitive operating system detail")),
             |snapshot, horizon, _| {
-                TrialRunResult::Completed(report(snapshot.heritable_identity_pair(), horizon))
+                TrialRunResult::completed(report(snapshot.heritable_identity_pair(), horizon))
             },
         );
 
@@ -780,7 +806,7 @@ mod tests {
             10,
             |_job| Err::<JoinHandle<()>, _>(io::Error::other("private OS detail")),
             |snapshot, horizon, _| {
-                TrialRunResult::Completed(report(snapshot.heritable_identity_pair(), horizon))
+                TrialRunResult::completed(report(snapshot.heritable_identity_pair(), horizon))
             },
         );
         assert_eq!(result, Err(TrialStartError::StartupFailed));
@@ -804,7 +830,7 @@ mod tests {
                 10,
                 |_job| Ok(std::thread::spawn(|| {})),
                 |snapshot, horizon, _| {
-                    TrialRunResult::Completed(report(snapshot.heritable_identity_pair(), horizon))
+                    TrialRunResult::completed(report(snapshot.heritable_identity_pair(), horizon))
                 },
             )
             .unwrap();
@@ -834,7 +860,7 @@ mod tests {
                     }))
                 },
                 |snapshot, horizon, _| {
-                    TrialRunResult::Completed(report(snapshot.heritable_identity_pair(), horizon))
+                    TrialRunResult::completed(report(snapshot.heritable_identity_pair(), horizon))
                 },
             )
             .unwrap();

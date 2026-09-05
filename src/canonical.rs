@@ -277,6 +277,7 @@ pub(crate) fn config(config: &Config, out: &mut Encoder) {
         ecotype_min_persistence_ticks: _,
         ecotype_min_reproductive_output: _,
         ecotype_min_descendant_generations: _,
+        counterfactual_replicates: _,
         resource_sources,
         foreign_exec_tracking: _,
         foreign_write_tracking: _,

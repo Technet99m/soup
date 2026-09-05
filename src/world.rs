@@ -31,6 +31,9 @@ struct ActiveBehaviorSegment {
 
 #[derive(Debug, Clone)]
 pub struct SymbiosisReport {
+    /// Exact public state from which the real trial was launched. Synthetic
+    /// statistical summaries leave this unavailable.
+    pub source_state_digest: Option<String>,
     pub heritable_identity_a: HeritableIdentity,
     pub heritable_identity_b: HeritableIdentity,
     pub horizon: u64,
@@ -38,7 +41,51 @@ pub struct SymbiosisReport {
     pub baseline_births_b: u64,
     pub dependence_a: f64,
     pub dependence_b: f64,
+    pub dependence_a_interval: Option<ConfidenceInterval>,
+    pub dependence_b_interval: Option<ConfidenceInterval>,
+    pub dependence_a_samples: usize,
+    pub dependence_b_samples: usize,
+    pub replicates: usize,
+    pub direct_transfer: DirectTransferEvidence,
+    pub control_failures: usize,
     pub verdict: RelationshipVerdict,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ConfidenceInterval {
+    pub lower: f64,
+    pub upper: f64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DirectTransferEvidence {
+    /// Resource units received by descendants of A from descendants of B.
+    pub a_received_from_b: u64,
+    /// Resource units received by descendants of B from descendants of A.
+    pub b_received_from_a: u64,
+    pub sample_count: usize,
+}
+
+/// Observer-only measurements from one paired replicate. A clade is the set of
+/// organisms descended from the organisms that had the focal heritable identity
+/// when the snapshot was captured. Membership therefore survives later genome,
+/// tag, and behavior changes; it is deliberately not an ecotype classification.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CounterfactualSample {
+    pub intact_births_a: u64,
+    pub without_b_births_a: u64,
+    pub intact_births_b: u64,
+    pub without_a_births_b: u64,
+    pub intact_steps_a: u64,
+    pub without_b_steps_a: u64,
+    pub intact_steps_b: u64,
+    pub without_a_steps_b: u64,
+    pub a_received_from_b: u64,
+    pub b_received_from_a: u64,
+    /// A duplicate intact branch must replay exactly within a replicate.
+    pub sham_matches_intact: bool,
+    /// All branches must expose the same exogenous source schedule.
+    pub resource_schedule_matches: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,7 +94,295 @@ pub enum RelationshipVerdict {
     ADependsOnB,
     BDependsOnA,
     Competition,
+    NoEffect,
     Inconclusive,
+}
+
+/// Summarize paired replicate effects using a two-sided 95% Student-t interval.
+/// Classification requires replication, reproductive evidence in both intact
+/// clades, passing replay controls, and intervals wholly outside (dependence or
+/// competition) or inside (no effect) the predeclared 20% effect margin.
+pub fn summarize_counterfactual_samples(
+    (heritable_identity_a, heritable_identity_b): (HeritableIdentity, HeritableIdentity),
+    horizon: u64,
+    samples: &[CounterfactualSample],
+) -> SymbiosisReport {
+    let effects_a: Vec<_> = samples
+        .iter()
+        .filter(|sample| {
+            sample.intact_births_a > 0 && sample.intact_steps_a > 0 && sample.without_b_steps_a > 0
+        })
+        .map(|sample| {
+            relative_loss(
+                sample.intact_births_a as f64 / sample.intact_steps_a.max(1) as f64,
+                sample.without_b_births_a as f64 / sample.without_b_steps_a.max(1) as f64,
+            )
+        })
+        .collect();
+    let effects_b: Vec<_> = samples
+        .iter()
+        .filter(|sample| {
+            sample.intact_births_b > 0 && sample.intact_steps_b > 0 && sample.without_a_steps_b > 0
+        })
+        .map(|sample| {
+            relative_loss(
+                sample.intact_births_b as f64 / sample.intact_steps_b.max(1) as f64,
+                sample.without_a_births_b as f64 / sample.without_a_steps_b.max(1) as f64,
+            )
+        })
+        .collect();
+    let (dependence_a, dependence_a_interval) = mean_and_interval(&effects_a);
+    let (dependence_b, dependence_b_interval) = mean_and_interval(&effects_b);
+    let baseline_births_a = saturating_sum(samples.iter().map(|sample| sample.intact_births_a));
+    let baseline_births_b = saturating_sum(samples.iter().map(|sample| sample.intact_births_b));
+    let control_failures = samples
+        .iter()
+        .filter(|sample| !sample.sham_matches_intact || !sample.resource_schedule_matches)
+        .count();
+    let required_births = u64::try_from(samples.len())
+        .unwrap_or(u64::MAX)
+        .saturating_mul(2);
+    let enough_evidence = samples.len() >= 2
+        && effects_a.len() == samples.len()
+        && effects_b.len() == samples.len()
+        && baseline_births_a >= required_births
+        && baseline_births_b >= required_births
+        && control_failures == 0;
+    let positive = |interval: Option<ConfidenceInterval>| {
+        interval.is_some_and(|interval| interval.lower >= 0.2)
+    };
+    let negative = |interval: Option<ConfidenceInterval>| {
+        interval.is_some_and(|interval| interval.upper <= -0.2)
+    };
+    let equivalent = |interval: Option<ConfidenceInterval>| {
+        interval.is_some_and(|interval| interval.lower > -0.2 && interval.upper < 0.2)
+    };
+    let verdict = if !enough_evidence {
+        RelationshipVerdict::Inconclusive
+    } else {
+        match (
+            positive(dependence_a_interval),
+            positive(dependence_b_interval),
+            negative(dependence_a_interval),
+            negative(dependence_b_interval),
+            equivalent(dependence_a_interval),
+            equivalent(dependence_b_interval),
+        ) {
+            (true, true, _, _, _, _) => RelationshipVerdict::Mutualism,
+            (true, false, _, _, _, true) => RelationshipVerdict::ADependsOnB,
+            (false, true, _, _, true, _) => RelationshipVerdict::BDependsOnA,
+            (false, false, true, true, _, _) => RelationshipVerdict::Competition,
+            (false, false, false, false, true, true) => RelationshipVerdict::NoEffect,
+            _ => RelationshipVerdict::Inconclusive,
+        }
+    };
+    SymbiosisReport {
+        source_state_digest: None,
+        heritable_identity_a,
+        heritable_identity_b,
+        horizon,
+        baseline_births_a,
+        baseline_births_b,
+        dependence_a,
+        dependence_b,
+        dependence_a_interval,
+        dependence_b_interval,
+        dependence_a_samples: effects_a.len(),
+        dependence_b_samples: effects_b.len(),
+        replicates: samples.len(),
+        direct_transfer: DirectTransferEvidence {
+            a_received_from_b: saturating_sum(
+                samples.iter().map(|sample| sample.a_received_from_b),
+            ),
+            b_received_from_a: saturating_sum(
+                samples.iter().map(|sample| sample.b_received_from_a),
+            ),
+            sample_count: samples.len(),
+        },
+        control_failures,
+        verdict,
+    }
+}
+
+fn saturating_sum(values: impl Iterator<Item = u64>) -> u64 {
+    values.fold(0, u64::saturating_add)
+}
+
+fn mean_and_interval(values: &[f64]) -> (f64, Option<ConfidenceInterval>) {
+    if values.is_empty() {
+        return (0.0, None);
+    }
+    let mean = values.iter().sum::<f64>() / values.len() as f64;
+    if values.len() == 1 {
+        return (mean, None);
+    }
+    let variance = values
+        .iter()
+        .map(|value| (value - mean).powi(2))
+        .sum::<f64>()
+        / (values.len() - 1) as f64;
+    let margin = student_t_975(values.len() - 1) * (variance / values.len() as f64).sqrt();
+    (
+        mean,
+        Some(ConfidenceInterval {
+            lower: mean - margin,
+            upper: mean + margin,
+        }),
+    )
+}
+
+fn student_t_975(degrees_of_freedom: usize) -> f64 {
+    const CRITICAL: [f64; 30] = [
+        12.706, 4.303, 3.182, 2.776, 2.571, 2.447, 2.365, 2.306, 2.262, 2.228, 2.201, 2.179, 2.160,
+        2.145, 2.131, 2.120, 2.110, 2.101, 2.093, 2.086, 2.080, 2.074, 2.069, 2.064, 2.060, 2.056,
+        2.052, 2.048, 2.045, 2.042,
+    ];
+    if let Some(critical) = CRITICAL.get(degrees_of_freedom.saturating_sub(1)) {
+        return *critical;
+    }
+    // Asymptotic expansion of the t quantile around the 97.5% normal
+    // quantile. Unlike a hard 1.96 fallback, this remains conservative for
+    // every finite degree of freedom above the table.
+    let df = degrees_of_freedom as f64;
+    let z: f64 = 1.959_963_984_540_054;
+    z + (z.powi(3) + z) / (4.0 * df)
+        + (5.0 * z.powi(5) + 16.0 * z.powi(3) + 3.0 * z) / (96.0 * df.powi(2))
+        + 0.000_1
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FocalClade {
+    A,
+    B,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct CladeMeasurement {
+    births_a: u64,
+    births_b: u64,
+    steps_a: u64,
+    steps_b: u64,
+    a_received_from_b: u64,
+    b_received_from_a: u64,
+}
+
+/// Passive ancestry observer used only inside cloned counterfactual worlds.
+/// Roots are selected by snapshot-time heritable identity; descendants retain
+/// membership through all later genotype, recognition-tag, and behavior changes.
+struct CladeTracker {
+    membership: HashMap<ProgramId, FocalClade>,
+    births_a: u64,
+    births_b: u64,
+    a_received_from_b: u64,
+    b_received_from_a: u64,
+}
+
+impl CladeTracker {
+    fn from_world(world: &World, pair: (HeritableIdentity, HeritableIdentity)) -> Self {
+        Self::from_roots(
+            world
+                .programs
+                .values()
+                .map(|program| (program.id, world.heritable_identity(program))),
+            pair,
+        )
+    }
+
+    fn from_roots(
+        roots: impl IntoIterator<Item = (ProgramId, HeritableIdentity)>,
+        pair: (HeritableIdentity, HeritableIdentity),
+    ) -> Self {
+        let membership = roots
+            .into_iter()
+            .filter_map(|(id, identity)| {
+                if identity == pair.0 {
+                    Some((id, FocalClade::A))
+                } else if identity == pair.1 {
+                    Some((id, FocalClade::B))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        Self {
+            membership,
+            births_a: 0,
+            births_b: 0,
+            a_received_from_b: 0,
+            b_received_from_a: 0,
+        }
+    }
+
+    fn membership(&self, id: ProgramId) -> Option<FocalClade> {
+        self.membership.get(&id).copied()
+    }
+
+    fn observe_birth(&mut self, parent_id: ProgramId, child_id: ProgramId) {
+        match self.membership(parent_id) {
+            Some(FocalClade::A) => {
+                self.membership.insert(child_id, FocalClade::A);
+                self.births_a += 1;
+            }
+            Some(FocalClade::B) => {
+                self.membership.insert(child_id, FocalClade::B);
+                self.births_b += 1;
+            }
+            None => {}
+        }
+    }
+
+    fn observe(&mut self, events: &[Event]) {
+        for event in events {
+            match event {
+                Event::Born {
+                    id,
+                    parent_id: Some(parent_id),
+                    ..
+                } => self.observe_birth(*parent_id, *id),
+                Event::ResourceTransfer {
+                    donor_id,
+                    receiver_id,
+                    amount,
+                    ..
+                } => match (self.membership(*donor_id), self.membership(*receiver_id)) {
+                    (Some(FocalClade::B), Some(FocalClade::A)) => {
+                        self.a_received_from_b += *amount as u64;
+                    }
+                    (Some(FocalClade::A), Some(FocalClade::B)) => {
+                        self.b_received_from_a += *amount as u64;
+                    }
+                    _ => {}
+                },
+                _ => {}
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn births(&self, clade: FocalClade) -> u64 {
+        match clade {
+            FocalClade::A => self.births_a,
+            FocalClade::B => self.births_b,
+        }
+    }
+
+    fn measure(&self, world: &World) -> CladeMeasurement {
+        let mut measurement = CladeMeasurement {
+            births_a: self.births_a,
+            births_b: self.births_b,
+            a_received_from_b: self.a_received_from_b,
+            b_received_from_a: self.b_received_from_a,
+            ..CladeMeasurement::default()
+        };
+        for (&id, &clade) in &self.membership {
+            let steps = world.steps_by_program_id.get(&id).copied().unwrap_or(0);
+            match clade {
+                FocalClade::A => measurement.steps_a += steps,
+                FocalClade::B => measurement.steps_b += steps,
+            }
+        }
+        measurement
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,6 +435,9 @@ pub struct World {
     pub interactions: HashMap<(HeritableIdentity, HeritableIdentity), u64>,
     /// Executed instructions attributed to the heritable identity present before each step.
     pub steps_by_heritable_identity: HashMap<HeritableIdentity, u64>,
+    /// Observer-only execution accounting by lineage node. Counterfactual clade
+    /// tracking reads this map but it never participates in simulation decisions.
+    steps_by_program_id: HashMap<ProgramId, u64>,
     pub total_births: u64,
     pub total_deaths: u64,
     pub total_mutations: u64,
@@ -293,6 +631,7 @@ impl World {
             viable_ecotypes_cache: BTreeMap::new(),
             interactions: HashMap::new(),
             steps_by_heritable_identity: HashMap::new(),
+            steps_by_program_id: HashMap::new(),
             total_births: 0,
             total_deaths: 0,
             total_mutations: 0,
@@ -367,14 +706,21 @@ impl World {
             .get(&id)
             .map(|program| self.heritable_identity(program))
             .unwrap_or(HeritableIdentity::new(0, 0));
+        let will_execute = self
+            .programs
+            .get(&id)
+            .is_some_and(|program| program.energy > 0);
         self.segment_identity_change(id, executing_heritable_identity);
         if let Some(heritable_identity) = self.heritable_identity_by_id.get_mut(id as usize) {
             *heritable_identity = executing_heritable_identity;
         }
-        *self
-            .steps_by_heritable_identity
-            .entry(executing_heritable_identity)
-            .or_default() += 1;
+        if will_execute {
+            *self
+                .steps_by_heritable_identity
+                .entry(executing_heritable_identity)
+                .or_default() += 1;
+            *self.steps_by_program_id.entry(id).or_default() += 1;
+        }
         let write_victim = self.programs.get(&id).and_then(|program| {
             matches!(
                 Opcode::from(self.memory.read(program.ip)),
@@ -1185,15 +1531,13 @@ impl World {
         best.map(|(pair, _)| pair)
     }
 
-    /// Clone the present ecosystem three ways: intact, without B, and without A.
-    /// Reproduction is normalized by instructions executed, preventing the
-    /// removed organisms' freed CPU share from masquerading as a benefit.
+    /// Run the configured number of replicated paired trials for the strongest pair.
     pub fn counterfactual_symbiosis(&self, horizon: u64) -> Option<SymbiosisReport> {
         let pair = self.candidate_partner_pair()?;
         Some(self.counterfactual_symbiosis_for_pair(pair, horizon))
     }
 
-    /// Run a counterfactual trial for an explicitly selected heritable-identity pair.
+    /// Run replicated trials for an explicitly selected snapshot-time identity pair.
     pub fn counterfactual_symbiosis_for_pair(
         &self,
         pair: (HeritableIdentity, HeritableIdentity),
@@ -1203,108 +1547,97 @@ impl World {
             .expect("an uncancelled counterfactual always completes")
     }
 
-    /// Runs a specified candidate pair while allowing a worker to report progress
-    /// and cooperatively cancel between simulated ticks.
+    /// Run paired replicates while allowing an asynchronous worker to report
+    /// cumulative simulated ticks and cooperatively cancel between ticks.
     pub(crate) fn counterfactual_symbiosis_for_pair_with_control<F>(
         &self,
-        (heritable_identity_a, heritable_identity_b): (HeritableIdentity, HeritableIdentity),
+        pair: (HeritableIdentity, HeritableIdentity),
         horizon: u64,
         mut continue_after: F,
     ) -> Option<SymbiosisReport>
     where
         F: FnMut(u64) -> bool,
     {
-        let mut intact = self.clone();
-        let mut without_b = self.clone();
-        let mut without_a = self.clone();
-        without_b.remove_heritable_identity(heritable_identity_b);
-        without_a.remove_heritable_identity(heritable_identity_a);
-
-        let intact_before =
-            intact.measure_heritable_identities(heritable_identity_a, heritable_identity_b);
-        let without_b_before =
-            without_b.measure_heritable_identities(heritable_identity_a, heritable_identity_b);
-        let without_a_before =
-            without_a.measure_heritable_identities(heritable_identity_a, heritable_identity_b);
         if !continue_after(0) {
             return None;
         }
-        for completed in 1..=horizon {
-            intact.tick();
-            without_b.tick();
-            without_a.tick();
-            if !continue_after(completed) {
-                return None;
+        let replicates = self.config.counterfactual_replicates;
+        let source_state = self.state_hash(false);
+        let mut samples = Vec::with_capacity(replicates);
+        for replicate in 0..replicates {
+            if horizon == 0 {
+                samples.push(CounterfactualSample {
+                    sham_matches_intact: true,
+                    resource_schedule_matches: true,
+                    ..CounterfactualSample::default()
+                });
+                if !continue_after(0) {
+                    return None;
+                }
+                continue;
             }
+            let seed = replicate_seed(source_state, pair, replicate);
+            let mut intact = self.clone();
+            let mut sham = self.clone();
+            let mut without_b = self.clone();
+            let mut without_a = self.clone();
+            for world in [&mut intact, &mut sham, &mut without_b, &mut without_a] {
+                world.rng = ChaCha12Rng::from_seed(seed);
+                world.steps_by_program_id.clear();
+            }
+            let mut intact_clades = CladeTracker::from_world(&intact, pair);
+
+            let mut without_b_clades = CladeTracker::from_world(&without_b, pair);
+            let mut without_a_clades = CladeTracker::from_world(&without_a, pair);
+            without_b.remove_heritable_identity(pair.1);
+            without_a.remove_heritable_identity(pair.0);
+
+            let mut resource_schedule_matches = true;
+            for completed in 1..=horizon {
+                let next_tick = intact.tick.saturating_add(1);
+                let expected_schedule = intact.scheduled_resources(next_tick);
+                resource_schedule_matches &= [&sham, &without_b, &without_a]
+                    .iter()
+                    .all(|world| world.scheduled_resources(next_tick) == expected_schedule);
+
+                let intact_events = intact.tick();
+                sham.tick();
+                let without_b_events = without_b.tick();
+                let without_a_events = without_a.tick();
+                intact_clades.observe(&intact_events);
+
+                without_b_clades.observe(&without_b_events);
+                without_a_clades.observe(&without_a_events);
+
+                let cumulative = (replicate as u64)
+                    .saturating_mul(horizon)
+                    .saturating_add(completed);
+                if !continue_after(cumulative) {
+                    return None;
+                }
+            }
+            let intact_measurement = intact_clades.measure(&intact);
+
+            let without_b_measurement = without_b_clades.measure(&without_b);
+            let without_a_measurement = without_a_clades.measure(&without_a);
+            samples.push(CounterfactualSample {
+                intact_births_a: intact_measurement.births_a,
+                without_b_births_a: without_b_measurement.births_a,
+                intact_births_b: intact_measurement.births_b,
+                without_a_births_b: without_a_measurement.births_b,
+                intact_steps_a: intact_measurement.steps_a,
+                without_b_steps_a: without_b_measurement.steps_a,
+                intact_steps_b: intact_measurement.steps_b,
+                without_a_steps_b: without_a_measurement.steps_b,
+                a_received_from_b: intact_measurement.a_received_from_b,
+                b_received_from_a: intact_measurement.b_received_from_a,
+                sham_matches_intact: intact.state_digest() == sham.state_digest(),
+                resource_schedule_matches,
+            });
         }
-        let intact_after =
-            intact.measure_heritable_identities(heritable_identity_a, heritable_identity_b);
-        let without_b_after =
-            without_b.measure_heritable_identities(heritable_identity_a, heritable_identity_b);
-        let without_a_after =
-            without_a.measure_heritable_identities(heritable_identity_a, heritable_identity_b);
-
-        let baseline_a = intact_after.0.saturating_sub(intact_before.0);
-        let baseline_b = intact_after.1.saturating_sub(intact_before.1);
-        let no_b_a = without_b_after.0.saturating_sub(without_b_before.0);
-        let no_a_b = without_a_after.1.saturating_sub(without_a_before.1);
-        let baseline_steps_a = intact_after.2.saturating_sub(intact_before.2);
-        let baseline_steps_b = intact_after.3.saturating_sub(intact_before.3);
-        let no_b_steps_a = without_b_after.2.saturating_sub(without_b_before.2);
-        let no_a_steps_b = without_a_after.3.saturating_sub(without_a_before.3);
-        let baseline_rate_a = baseline_a as f64 / baseline_steps_a.max(1) as f64;
-        let baseline_rate_b = baseline_b as f64 / baseline_steps_b.max(1) as f64;
-        let no_b_rate_a = no_b_a as f64 / no_b_steps_a.max(1) as f64;
-        let no_a_rate_b = no_a_b as f64 / no_a_steps_b.max(1) as f64;
-        let dependence_a = relative_loss(baseline_rate_a, no_b_rate_a);
-        let dependence_b = relative_loss(baseline_rate_b, no_a_rate_b);
-        let enough_evidence = baseline_a >= 2 && baseline_b >= 2;
-        let a_depends = enough_evidence && dependence_a >= 0.2;
-        let b_depends = enough_evidence && dependence_b >= 0.2;
-        let verdict = match (a_depends, b_depends) {
-            (true, true) => RelationshipVerdict::Mutualism,
-            (true, false) => RelationshipVerdict::ADependsOnB,
-            (false, true) => RelationshipVerdict::BDependsOnA,
-            (false, false) if enough_evidence && dependence_a <= -0.2 && dependence_b <= -0.2 => {
-                RelationshipVerdict::Competition
-            }
-            _ => RelationshipVerdict::Inconclusive,
-        };
-        Some(SymbiosisReport {
-            heritable_identity_a,
-            heritable_identity_b,
-            horizon,
-            baseline_births_a: baseline_a,
-            baseline_births_b: baseline_b,
-            dependence_a,
-            dependence_b,
-            verdict,
-        })
-    }
-
-    fn measure_heritable_identities(
-        &self,
-        a: HeritableIdentity,
-        b: HeritableIdentity,
-    ) -> (u64, u64, u64, u64) {
-        (
-            self.births_by_parent_heritable_identity
-                .get(&a)
-                .copied()
-                .unwrap_or(0),
-            self.births_by_parent_heritable_identity
-                .get(&b)
-                .copied()
-                .unwrap_or(0),
-            self.steps_by_heritable_identity
-                .get(&a)
-                .copied()
-                .unwrap_or(0),
-            self.steps_by_heritable_identity
-                .get(&b)
-                .copied()
-                .unwrap_or(0),
-        )
+        let mut report = summarize_counterfactual_samples(pair, horizon, &samples);
+        report.source_state_digest = Some(self.state_digest());
+        Some(report)
     }
 
     fn remove_heritable_identity(&mut self, heritable_identity: HeritableIdentity) {
@@ -1332,6 +1665,19 @@ impl World {
     }
 }
 
+fn replicate_seed(
+    source_state: [u8; 32],
+    pair: (HeritableIdentity, HeritableIdentity),
+    replicate: usize,
+) -> [u8; 32] {
+    let mut out = Encoder::new("counterfactual-replicate/v1");
+    out.value(&source_state);
+    out.value(&pair.0);
+    out.value(&pair.1);
+    out.value(&replicate);
+    out.finish()
+}
+
 fn environment_origin(seed: u64) -> u16 {
     // SplitMix64 finalizer gives each seed a stable, well-distributed spatial phase.
     let mut value = seed.wrapping_add(0x9e37_79b9_7f4a_7c15);
@@ -1350,7 +1696,7 @@ fn relative_loss(baseline: f64, counterfactual: f64) -> f64 {
     if baseline <= f64::EPSILON {
         0.0
     } else {
-        ((baseline - counterfactual) / baseline).clamp(-10.0, 1.0)
+        (baseline - counterfactual) / baseline
     }
 }
 
@@ -2581,6 +2927,97 @@ mod tests {
             "ancestor should reproduce from fixed sources"
         );
         assert!(world.live_count() > 0, "the lineage should remain alive");
+    }
+
+    #[test]
+    fn zero_energy_death_turn_does_not_count_as_executed_step() {
+        let mut world = World::new(seed_config());
+        world.programs.get_mut(&0).unwrap().energy = 0;
+        let identity = world.heritable_identity(&world.programs[&0]);
+
+        world.tick();
+
+        assert!(!world.steps_by_program_id.contains_key(&0));
+        assert!(!world.steps_by_heritable_identity.contains_key(&identity));
+    }
+
+    #[test]
+    fn clade_membership_follows_parentage_not_mutated_identity_or_behavior() {
+        let a = HeritableIdentity::new(10, 1);
+        let b = HeritableIdentity::new(20, 2);
+        let mut tracker = CladeTracker::from_roots([(0, a), (1, b)], (a, b));
+
+        tracker.observe_birth(0, 2);
+        tracker.observe_birth(2, 3);
+        tracker.observe_birth(1, 4);
+
+        assert_eq!(tracker.membership(3), Some(FocalClade::A));
+        assert_eq!(tracker.membership(4), Some(FocalClade::B));
+        assert_eq!(tracker.births(FocalClade::A), 2);
+        assert_eq!(tracker.births(FocalClade::B), 1);
+    }
+
+    #[test]
+    fn replicate_seed_is_stable_and_distinct() {
+        let pair = (
+            HeritableIdentity::new(0xaaa, 1),
+            HeritableIdentity::new(0xbbb, 2),
+        );
+        let source = [42; 32];
+        assert_eq!(
+            replicate_seed(source, pair, 3),
+            replicate_seed(source, pair, 3)
+        );
+        assert_ne!(
+            replicate_seed(source, pair, 3),
+            replicate_seed(source, pair, 4)
+        );
+        assert_ne!(
+            replicate_seed(source, pair, 3),
+            replicate_seed([43; 32], pair, 3)
+        );
+    }
+
+    #[test]
+    fn replicated_trial_is_replayable_and_passes_paired_controls() {
+        let mut config = seed_config();
+        config.counterfactual_replicates = 3;
+        config.initial_energy = 10_000;
+        let mut world = World::new(config);
+        let identity_a = world.heritable_identity(&world.programs[&0]);
+        let identity_b = add_seed_clone(&mut world, 1, 7);
+        world.queue.push_back(1);
+        world.next_id = 2;
+        let pair = (identity_a, identity_b);
+
+        let first = world.counterfactual_symbiosis_for_pair(pair, 500);
+        let second = world.counterfactual_symbiosis_for_pair(pair, 500);
+
+        assert_eq!(format!("{first:?}"), format!("{second:?}"));
+        assert_eq!(first.source_state_digest, Some(world.state_digest()));
+        assert_eq!(first.replicates, 3);
+        assert_eq!(first.control_failures, 0);
+        assert_eq!(first.direct_transfer.sample_count, 3);
+    }
+
+    #[test]
+    fn zero_horizon_replicates_remain_cooperatively_cancellable() {
+        let mut config = seed_config();
+        config.counterfactual_replicates = 2;
+        let world = World::new(config);
+        let pair = (
+            HeritableIdentity::new(0xaaa, 1),
+            HeritableIdentity::new(0xbbb, 2),
+        );
+        let mut checks = 0;
+
+        let report = world.counterfactual_symbiosis_for_pair_with_control(pair, 0, |_| {
+            checks += 1;
+            checks < 2
+        });
+
+        assert!(report.is_none());
+        assert_eq!(checks, 2);
     }
 
     #[test]

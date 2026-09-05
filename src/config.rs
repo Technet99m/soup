@@ -71,6 +71,9 @@ pub struct Config {
     pub ecotype_min_reproductive_output: u64,
     /// Stable parent-to-descendant links required (2 requires a grandchild).
     pub ecotype_min_descendant_generations: u32,
+    /// Number of paired counterfactual replicates. Values below two are allowed
+    /// for diagnostics but can only produce an Inconclusive verdict.
+    pub counterfactual_replicates: usize,
     pub rng_seed: u64,
     /// Amount subtracted from each energy deposit per decay event. Default: 1.
     pub energy_decay_rate: u32,
@@ -121,6 +124,7 @@ impl Default for Config {
             ecotype_min_persistence_ticks: 10_000,
             ecotype_min_reproductive_output: 2,
             ecotype_min_descendant_generations: 2,
+            counterfactual_replicates: 8,
             rng_seed: 42,
             energy_decay_rate: 1,
             energy_decay_interval: 100,
@@ -203,6 +207,7 @@ impl Config {
                 c.ecotype_min_persistence_ticks = file_cfg.ecotype_min_persistence_ticks;
                 c.ecotype_min_reproductive_output = file_cfg.ecotype_min_reproductive_output;
                 c.ecotype_min_descendant_generations = file_cfg.ecotype_min_descendant_generations;
+                c.counterfactual_replicates = file_cfg.counterfactual_replicates;
                 c.rng_seed = file_cfg.rng_seed;
                 c.energy_decay_rate = file_cfg.energy_decay_rate;
                 c.energy_decay_interval = file_cfg.energy_decay_interval;
@@ -260,6 +265,7 @@ impl Config {
             ecotype_min_descendant_generations,
             "ECOTYPE_MIN_DESCENDANT_GENERATIONS"
         );
+        parse_env!(counterfactual_replicates, "COUNTERFACTUAL_REPLICATES");
         parse_env!(rng_seed, "RNG_SEED");
         parse_env!(energy_decay_rate, "ENERGY_DECAY_RATE");
         parse_env!(energy_decay_interval, "ENERGY_DECAY_INTERVAL");

@@ -69,6 +69,22 @@ fn worker_uses_immutable_snapshot_and_reports_source_tick() {
 }
 
 #[test]
+fn worker_progress_counts_all_replicates() {
+    let mut world = empty_world(5);
+    world.config.counterfactual_replicates = 3;
+    let pair = (identity(1, 3), identity(2, 4));
+    let mut worker = TrialWorker::default();
+
+    worker
+        .start(TrialSnapshot::capture_for_pair(&world, pair), 10)
+        .unwrap();
+
+    assert_eq!(worker.progress().expect("initial progress").total, 30);
+    worker.cancel();
+    let _ = wait_for_terminal(&mut worker);
+}
+
+#[test]
 fn worker_is_single_flight_and_cancellable() {
     let world = empty_world(77);
     let pair = (identity(1, 3), identity(2, 4));
