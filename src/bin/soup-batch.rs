@@ -143,6 +143,7 @@ fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
 fn parse_arguments(arguments: Vec<String>) -> Result<Arguments, BoxError> {
     let mut seed_range = None;
     let mut seed_file = None;
+    let mut seed_option_seen = false;
     let mut ticks = None;
     let mut output = None;
     let mut config = PathBuf::from("soup.toml");
@@ -160,8 +161,26 @@ fn parse_arguments(arguments: Vec<String>) -> Result<Arguments, BoxError> {
                 .ok_or_else(|| format!("{argument} requires a value").into())
         };
         match argument.as_str() {
-            "--seeds" => seed_range = Some(value(&mut index)?.to_owned()),
-            "--seed-file" => seed_file = Some(PathBuf::from(value(&mut index)?)),
+            "--seeds" => {
+                if seed_option_seen {
+                    return Err(
+                        "provide exactly one of --seeds or --seed-file (duplicate seed option)"
+                            .into(),
+                    );
+                }
+                seed_option_seen = true;
+                seed_range = Some(value(&mut index)?.to_owned());
+            }
+            "--seed-file" => {
+                if seed_option_seen {
+                    return Err(
+                        "provide exactly one of --seeds or --seed-file (duplicate seed option)"
+                            .into(),
+                    );
+                }
+                seed_option_seen = true;
+                seed_file = Some(PathBuf::from(value(&mut index)?));
+            }
             "--ticks" => ticks = Some(parse_positive(value(&mut index)?, "--ticks")?),
             "--output" => output = Some(PathBuf::from(value(&mut index)?)),
             "--config" => config = PathBuf::from(value(&mut index)?),

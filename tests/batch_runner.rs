@@ -189,6 +189,24 @@ fn resume_rejects_changed_effective_templates() {
 }
 
 #[test]
+fn resume_rejects_corrupt_completed_checkpoint_rows() {
+    let dir = std::env::temp_dir().join(format!("soup-batch-corrupt-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let output = dir.join("results.json");
+    let mut initial = report(vec![1]);
+    initial.replicates.push(completed(1, true, 1, 0));
+    initial.refresh_aggregate();
+    initial.write_atomic(&output).unwrap();
+
+    let mut json: serde_json::Value = serde_json::from_slice(&fs::read(&output).unwrap()).unwrap();
+    json["replicates"][0]["conserved_energy"] = serde_json::Value::Bool(false);
+    fs::write(&output, serde_json::to_vec(&json).unwrap()).unwrap();
+    assert!(BatchReport::read(&output).is_err());
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
 fn repeated_replicates_are_identical_and_conserve_energy() {
     let config = Config {
         templates_dir: PathBuf::from("/nonexistent_soup_batch_determinism"),

@@ -176,6 +176,7 @@ impl BatchReport {
                         || replicate.counterfactual_tested
                             != report.experiment.counterfactual.enabled
                         || replicate.survived != (replicate.final_population > 0)
+                        || !replicate.conserved_energy
                         || (!replicate.counterfactual_tested
                             && replicate.relationship.is_some()) =>
                 {

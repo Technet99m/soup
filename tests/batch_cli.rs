@@ -108,6 +108,22 @@ fn cli_accepts_a_seed_file_and_rejects_malformed_configuration() {
     assert!(!conflict.status.success());
     assert!(String::from_utf8_lossy(&conflict.stderr).contains("exactly one"));
 
+    let duplicate_option = Command::new(binary)
+        .args([
+            "--seeds",
+            "1..=2",
+            "--seeds",
+            "3..=4",
+            "--ticks",
+            "10",
+            "--output",
+            output.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(!duplicate_option.status.success());
+    assert!(String::from_utf8_lossy(&duplicate_option.stderr).contains("duplicate seed option"));
+
     let duplicate = Command::new(binary)
         .args([
             "--seed-file",
