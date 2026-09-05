@@ -55,23 +55,23 @@ Every possible byte value must map to a valid instruction. Group them:
 | 27 | `SPLIT` | Like COMMIT but immediately gives child half of remaining energy |
 | 28 | `SCAN_FWD` | Scan forward until cell == A, put found address in B |
 | 29 | `SCAN_BWD` | Scan backward until cell == A, put found address in B |
-| 30 | `EXCRETE_A` | Move up to register B units from the internal A store to the A map at the write head. |
-| 31 | `TAKE_RESOURCE_A` | Move the A deposit at the read head into the internal A store; it does not become energy. |
+| 30 | `EXCRETE_A` | Move up to register B units from the internal A store to the A map at the write head, bounded by the resource-flux limit. |
+| 31 | `TAKE_RESOURCE_A` | Move a bounded amount of the A deposit at the read head into the internal A store; it does not become energy. |
 | 32 | `SENSE_RESOURCE_A` | Load the A deposit at the read head into register B (saturating at 65535). |
 | 33 | `MEASURE_SELF` | Load this program's registered length into register A. |
 | 34 | `SET_READ_HEAD` | Set read head to register B |
 | 35 | `SEEK_FOREIGN_START` | Put the nearest foreign-owned address within `INTERACTION_RADIUS` in B; leave B unchanged if none is local. |
-| 36 | `EXCRETE_A_IMM` | Move stored A to a two-byte immediate address |
-| 37 | `TAKE_RESOURCE_B` | Move the B deposit at the read head into the internal B store; it does not become energy. |
+| 36 | `EXCRETE_A_IMM` | Move a bounded amount of stored A to a two-byte immediate address |
+| 37 | `TAKE_RESOURCE_B` | Move a bounded amount of the B deposit at the read head into the internal B store; it does not become energy. |
 | 38 | `SENSE_RESOURCE_B` | Load B resource at the read head into register B |
-| 39 | `EXCRETE_B` | Move up to register B units from the internal B store to the B map at the write head |
+| 39 | `EXCRETE_B` | Move up to register B units from the internal B store to the B map at the write head, bounded by the resource-flux limit |
 | 40 | `SEEK_RESOURCE_A` | Move the read head to the nearest A deposit |
 | 41 | `SEEK_RESOURCE_B` | Move the read head to the nearest B deposit |
 | 42 | `SET_TAG` | Set the organism's recognition tag from register A |
 | 43 | `SEEK_TAG` | Put the nearest foreign-owned address whose owner's tag matches A within `INTERACTION_RADIUS` in B; leave B unchanged if none is local. |
-| 44 | `CONVERT_A` | Convert stored A to energy, up to register B units; B=0 converts all. |
-| 45 | `CONVERT_B` | Convert stored B to energy, up to register B units; B=0 converts all. |
-| 46 | `COMBINE_AB` | Consume equal A and B amounts and yield two energy per pair; B=0 combines all possible pairs. |
+| 44 | `CONVERT_A` | Convert stored A to energy, bounded by register B and the metabolism limit; B=0 requests the configured limit. |
+| 45 | `CONVERT_B` | Convert stored B to energy, bounded by register B and the metabolism limit; B=0 requests the configured limit. |
+| 46 | `COMBINE_AB` | Consume equal A and B amounts and yield two energy per pair, bounded by register B and the metabolism limit; B=0 requests the configured limit. |
 | 47–254 | aliases | Decode with instruction index `(byte - 47) mod 48`, where indices 0–46 are the canonical rows above and index 47 is `HALT`. |
 | 255 | `HALT` | Stop execution immediately |
 
@@ -113,6 +113,8 @@ LOOP — loop stack (max depth 8)
 - A program that successfully calls `COMMIT` passes a lineage record to the child
 - Resource uptake fills `MA` or `MB`; only the matching conversion opcode can turn that store into energy. Energy can never be relabeled as A or B.
 - `EXCRETE_A`, `EXCRETE_A_IMM`, and `EXCRETE_B` move existing metabolites back to the world. They never spend energy as product.
+- `MAX_RESOURCE_FLUX_PER_INSTRUCTION` bounds each uptake or excretion by the deposit/store, receiving capacity, request where applicable, and the same A/B physical limit. `MAX_METABOLISM_PER_INSTRUCTION` bounds each conversion and the number of A+B pairs combined. A zero limit disables that throughput; it never means unlimited.
+- Both defaults are 256. At one energy unit per instruction and a default maximum age of 20,000 instructions, these limits make elapsed scheduler time matter while leaving the 200-unit largest default source emission available in one turn. The limits depend only on physical quantities and never on identity, behavior, lineage success, or fitness.
 - `COMMIT` and `SPLIT` transfer half of each metabolite store to the child. Death returns energy and both stores to ambient.
 - Instruction costs, uptake, conversion, combination, excretion, inheritance, decay, and rain all conserve `TOTAL_ENERGY` exactly.
 
@@ -262,6 +264,8 @@ INTERACTION_RADIUS  default: 256
 ALLOC_COST          default: 10
 COMMIT_COST         default: 20
 MAX_PROGRAM_AGE     default: 20000
+MAX_RESOURCE_FLUX_PER_INSTRUCTION default: 256 A/B units per TAKE or EXCRETE
+MAX_METABOLISM_PER_INSTRUCTION    default: 256 A/B units or A+B pairs
 LOOP_MAX_DEPTH      default: 8
 TICKS_PER_STAT_LOG  default: 10000
 ENERGY_CURRENT      default: 17
@@ -293,7 +297,8 @@ and environment overrides have already been applied), followed by the loaded
 startup templates in loader order. The namespace includes all mutation rates,
 energy and lifespan parameters, allocation/commit costs, interaction and loop
 limits, seed, current/decay parameters, and every source's kind, offset, interval,
-amount, width, and velocity. Source order is significant because sources draw
+amount, width, and velocity, plus both per-instruction physical throughput
+limits. Source order is significant because sources draw
 from the same finite ambient pool.
 
 Templates are loaded in filename order. Each loaded template contributes its
@@ -399,7 +404,7 @@ Encoding is explicit, not Rust `Hash`, `Debug`, serde object layout, or
 `DefaultHasher`. Every encoding starts with length-prefixed `soup/canonical/v1`
 and a distinct domain: `run-namespace/v1`, `standalone-program/v1`,
 `startup-lineage/v1`, `birth-state/v1`, `birth-lineage/v1`, or `public-state/v1`.
-Configuration also carries `effective-config/v1`. Fields have fixed schema order.
+Configuration also carries `effective-config/v2`. Fields have fixed schema order.
 Integers use their declared width in little endian; `usize` values and collection/
 string lengths use `u64`. Floats encode their IEEE-754 `u64` bits. Strings encode
 UTF-8 bytes; sequences (including byte arrays) encode length then elements.

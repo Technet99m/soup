@@ -59,6 +59,10 @@ pub struct Config {
     pub commit_cost: u32,
     /// Maximum instructions executed by one organism before senescence. Zero disables it.
     pub max_program_age: u64,
+    /// Maximum A or B units moved by one TAKE/EXCRETE instruction.
+    pub max_resource_flux_per_instruction: u32,
+    /// Maximum A units, B units, or A+B pairs processed by one metabolic instruction.
+    pub max_metabolism_per_instruction: u32,
     pub loop_max_depth: usize,
     pub ticks_per_stat_log: u64,
     /// Minimum accumulated observation time before reporting an ecotype.
@@ -110,6 +114,8 @@ impl Default for Config {
             alloc_cost: 10,
             commit_cost: 20,
             max_program_age: 20_000,
+            max_resource_flux_per_instruction: 256,
+            max_metabolism_per_instruction: 256,
             loop_max_depth: 8,
             ticks_per_stat_log: 10_000,
             ecotype_min_persistence_ticks: 10_000,
@@ -190,6 +196,8 @@ impl Config {
                 c.alloc_cost = file_cfg.alloc_cost;
                 c.commit_cost = file_cfg.commit_cost;
                 c.max_program_age = file_cfg.max_program_age;
+                c.max_resource_flux_per_instruction = file_cfg.max_resource_flux_per_instruction;
+                c.max_metabolism_per_instruction = file_cfg.max_metabolism_per_instruction;
                 c.loop_max_depth = file_cfg.loop_max_depth;
                 c.ticks_per_stat_log = file_cfg.ticks_per_stat_log;
                 c.ecotype_min_persistence_ticks = file_cfg.ecotype_min_persistence_ticks;
@@ -230,6 +238,14 @@ impl Config {
         parse_env!(alloc_cost, "ALLOC_COST");
         parse_env!(commit_cost, "COMMIT_COST");
         parse_env!(max_program_age, "MAX_PROGRAM_AGE");
+        parse_env!(
+            max_resource_flux_per_instruction,
+            "MAX_RESOURCE_FLUX_PER_INSTRUCTION"
+        );
+        parse_env!(
+            max_metabolism_per_instruction,
+            "MAX_METABOLISM_PER_INSTRUCTION"
+        );
         parse_env!(loop_max_depth, "LOOP_MAX_DEPTH");
         parse_env!(ticks_per_stat_log, "TICKS_PER_STAT_LOG");
         parse_env!(
@@ -259,5 +275,24 @@ impl Config {
             c.templates_dir = PathBuf::from(v);
         }
         c
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn throughput_limits_load_from_toml_and_have_viable_defaults() {
+        let parsed: Config = toml::from_str(
+            "max_resource_flux_per_instruction = 17\nmax_metabolism_per_instruction = 23\n",
+        )
+        .unwrap();
+        assert_eq!(parsed.max_resource_flux_per_instruction, 17);
+        assert_eq!(parsed.max_metabolism_per_instruction, 23);
+
+        let defaults = Config::default();
+        assert_eq!(defaults.max_resource_flux_per_instruction, 256);
+        assert_eq!(defaults.max_metabolism_per_instruction, 256);
     }
 }

@@ -16,6 +16,13 @@ alloc_cost            = 10    # energy cost to allocate memory
 commit_cost           = 20     # energy cost to commit (reproduce)
 max_program_age       = 20_000 # executed instructions before an organism wears out
 
+# --- Physical throughput ---
+# Per-instruction caps keep scheduler turns physically comparable. A value of
+# zero disables the corresponding transfers/conversions rather than removing
+# the cap. COMBINE_AB counts one A+B pair as one unit of metabolism.
+max_resource_flux_per_instruction = 256 # TAKE/EXCRETE units for either chemistry
+max_metabolism_per_instruction    = 256 # CONVERT units or COMBINE_AB pairs
+
 # --- Simulation ---
 # These five rates initialize startup ancestors. Descendants inherit fixed-point
 # copies and can move every rate up or down; later config changes do not overwrite them.
