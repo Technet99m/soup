@@ -124,6 +124,9 @@ fn run() -> Result<(), BoxError> {
         report.write_atomic(&arguments.output)?;
         return Err(error);
     }
+    if report.aggregate.completed == 0 && report.aggregate.failed > 0 {
+        return Err("all batch replicates failed".into());
+    }
     Ok(())
 }
 
@@ -231,7 +234,21 @@ fn parse_seed_file(path: &PathBuf) -> Result<Vec<u64>, BoxError> {
                 path.display()
             )
         })?;
-        seeds.insert(seed);
+        if !seeds.insert(seed) {
+            return Err(format!(
+                "invalid TOML/duplicate seed: seed file {} contains duplicate seed {seed}",
+                path.display()
+            )
+            .into());
+        }
+        if seeds.len() as u64 > soup::batch::MAX_REPLICATES {
+            return Err(format!(
+                "seed file {} contains more than {} seeds",
+                path.display(),
+                soup::batch::MAX_REPLICATES
+            )
+            .into());
+        }
     }
     if seeds.is_empty() {
         return Err(format!("seed file {} contains no seeds", path.display()).into());

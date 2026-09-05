@@ -172,7 +172,9 @@ impl BatchReport {
                             .is_some_and(is_hex_digest)
                         || replicate.ticks_completed > report.experiment.ticks
                         || replicate.counterfactual_tested
-                            != report.experiment.counterfactual.enabled =>
+                            != report.experiment.counterfactual.enabled
+                        || replicate.survived != (replicate.final_population > 0)
+                        || replicate.relationship.is_some() != replicate.counterfactual_tested =>
                 {
                     return Err("batch report contains an inconsistent completed replicate".into());
                 }
@@ -494,6 +496,7 @@ fn verdict_name(verdict: RelationshipVerdict) -> &'static str {
         RelationshipVerdict::ADependsOnB => "a_depends_on_b",
         RelationshipVerdict::BDependsOnA => "b_depends_on_a",
         RelationshipVerdict::Competition => "competition",
+        RelationshipVerdict::NoEffect => "no_effect",
         RelationshipVerdict::Inconclusive => "inconclusive",
     }
 }
@@ -619,6 +622,18 @@ fn rate_summary(numerator: u64, denominator: u64) -> RateSummary {
     let n = denominator as f64;
     let estimate = numerator as f64 / n;
     let z = 1.959_963_984_540_054_f64;
+    if numerator == 0 {
+        return RateSummary {
+            numerator,
+            denominator,
+            estimate: 0.0,
+            ci95: ConfidenceInterval {
+                confidence: 0.95,
+                lower: 0.0,
+                upper: (z * z / n) / (1.0 + z * z / n),
+            },
+        };
+    }
     let denominator_term = 1.0 + z * z / n;
     let center = (estimate + z * z / (2.0 * n)) / denominator_term;
     let half_width =
@@ -649,13 +664,19 @@ where
         };
     }
     let values: Vec<_> = results.iter().map(|result| value(result)).collect();
-    let mean = values.iter().map(|value| *value as f64).sum::<f64>() / values.len() as f64;
+    let base = values[0];
+    let deviations: Vec<i128> = values
+        .iter()
+        .map(|item| i128::from(*item) - i128::from(base))
+        .collect();
+    let mean = base as f64 + deviations.iter().sum::<i128>() as f64 / values.len() as f64;
     let sample_stddev = if values.len() < 2 {
         0.0
     } else {
-        (values
+        let deviation_mean = deviations.iter().sum::<i128>() as f64 / values.len() as f64;
+        (deviations
             .iter()
-            .map(|item| (*item as f64 - mean).powi(2))
+            .map(|item| (*item as f64 - deviation_mean).powi(2))
             .sum::<f64>()
             / (values.len() - 1) as f64)
             .sqrt()

@@ -108,6 +108,23 @@ fn cli_accepts_a_seed_file_and_rejects_malformed_configuration() {
     assert!(!conflict.status.success());
     assert!(String::from_utf8_lossy(&conflict.stderr).contains("exactly one"));
 
+    let duplicate = Command::new(binary)
+        .args([
+            "--seed-file",
+            seeds.to_str().unwrap(),
+            "--ticks",
+            "10",
+            "--config",
+            "soup.toml",
+            "--output",
+            output.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(!duplicate.status.success());
+    assert!(String::from_utf8_lossy(&duplicate.stderr).contains("duplicate seed"));
+    fs::write(&seeds, "# replicate seeds\n9\n\n7\n").unwrap();
+
     let good = Command::new(binary)
         .args([
             "--seed-file",

@@ -33,7 +33,7 @@ impl Default for ResourceSource {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub memory_size: usize,
     pub initial_energy: u32,
