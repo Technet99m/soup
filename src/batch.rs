@@ -171,10 +171,13 @@ impl BatchReport {
                             .as_deref()
                             .is_some_and(is_hex_digest)
                         || replicate.ticks_completed > report.experiment.ticks
+                        || (replicate.survived
+                            && replicate.ticks_completed != report.experiment.ticks)
                         || replicate.counterfactual_tested
                             != report.experiment.counterfactual.enabled
                         || replicate.survived != (replicate.final_population > 0)
-                        || replicate.relationship.is_some() != replicate.counterfactual_tested =>
+                        || (!replicate.counterfactual_tested
+                            && replicate.relationship.is_some()) =>
                 {
                     return Err("batch report contains an inconsistent completed replicate".into());
                 }
@@ -445,7 +448,10 @@ where
                 let Some(report) = report else {
                     return Err(Box::new(BatchInterrupted));
                 };
-                let confirmed = report.verdict != RelationshipVerdict::Inconclusive;
+                let confirmed = !matches!(
+                    report.verdict,
+                    RelationshipVerdict::NoEffect | RelationshipVerdict::Inconclusive
+                );
                 Some(RelationshipResult {
                     verdict: verdict_name(report.verdict).into(),
                     confirmed,

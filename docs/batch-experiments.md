@@ -16,7 +16,7 @@ cargo run --release --bin soup-batch -- \
   --output experiments/emergence-1000-1099.json
 ```
 
-Or supply one unsigned decimal seed per line; blank lines, `#` comments, duplicates, and input order are normalized deterministically:
+Or supply one unsigned decimal seed per line; blank lines, `#` comments, and input order are normalized deterministically. Duplicate seeds are rejected:
 
 ```sh
 cargo run --release --bin soup-batch -- \
@@ -28,7 +28,7 @@ cargo run --release --bin soup-batch -- \
 
 `--templates-dir PATH` overrides the effective config's template directory. Counterfactual trials are disabled unless `--counterfactual` is present. `--counterfactual-horizon` defaults to 100,000 ticks when enabled.
 
-Each replicate seed replaces **only** `simulation_config.rng_seed`; every other effective simulation setting and the compiled Git commit stay fixed. Seeds are sorted and deduplicated, and replicate rows are always seed-ordered.
+Each replicate seed replaces **only** `simulation_config.rng_seed`; every other effective simulation setting and the compiled Git commit stay fixed. Seeds are sorted and replicate rows are always seed-ordered.
 
 ## Output and interpretation
 
