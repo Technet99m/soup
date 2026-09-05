@@ -52,6 +52,20 @@ fn is_hex_digest(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
+fn valid_relationship(relationship: &RelationshipResult, report: &BatchReport) -> bool {
+    let confirmed_verdict = matches!(
+        relationship.verdict.as_str(),
+        "mutualism" | "a_depends_on_b" | "b_depends_on_a" | "competition"
+    );
+    let verdict_known =
+        confirmed_verdict || matches!(relationship.verdict.as_str(), "no_effect" | "inconclusive");
+    verdict_known
+        && relationship.confirmed == confirmed_verdict
+        && relationship.horizon == report.experiment.counterfactual.horizon
+        && relationship.dependence_a.is_finite()
+        && relationship.dependence_b.is_finite()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CounterfactualSettings {
     pub enabled: bool,
@@ -177,6 +191,13 @@ impl BatchReport {
                             != report.experiment.counterfactual.enabled
                         || replicate.survived != (replicate.final_population > 0)
                         || !replicate.conserved_energy
+                        || replicate.counterfactual_tested
+                            != report.experiment.counterfactual.enabled
+                        || replicate.relationship.is_some()
+                            != report.experiment.counterfactual.enabled
+                        || replicate.relationship.as_ref().is_some_and(|relationship| {
+                            !valid_relationship(relationship, &report)
+                        })
                         || (!replicate.counterfactual_tested
                             && replicate.relationship.is_some()) =>
                 {

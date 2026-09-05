@@ -183,7 +183,10 @@ impl Config {
         // Try loading TOML file
         let config_path = std::env::var("SOUP_CONFIG").unwrap_or_else(|_| "soup.toml".to_string());
         if let Ok(contents) = std::fs::read_to_string(&config_path) {
-            if let Ok(file_cfg) = toml::from_str::<Config>(&contents) {
+            let file_cfg = toml::from_str::<Config>(&contents).unwrap_or_else(|error| {
+                panic!("invalid TOML in {config_path}: {error}");
+            });
+            {
                 // Overlay file values onto defaults
                 c.initial_energy = file_cfg.initial_energy;
                 c.mutation_rate = file_cfg.mutation_rate;

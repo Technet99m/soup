@@ -281,6 +281,7 @@ fn validate_config(config: &Config) -> Result<(), BoxError> {
     }
     for (name, rate) in [
         ("mutation_rate", config.mutation_rate),
+        ("strategy_mutation_rate", config.strategy_mutation_rate),
         ("insertion_rate", config.insertion_rate),
         ("deletion_rate", config.deletion_rate),
         ("duplication_rate", config.duplication_rate),
